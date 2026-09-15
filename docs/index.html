@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSCC Decoder Audio Results</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
+        h1, h2 { color: #333; }
+        .audio-container { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: #f9f9f9;}
+        audio { width: 100%; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>Audio Reconstruction Results using JSCC</h1>
+    <p>This page demonstrates the audio reconstruction quality of our proposed Joint Source-Channel Coding (JSCC) decoder over varying Signal-to-Noise Ratios (SNR).</p>
+
+    <h2>Experiment 1: Speech Transmission at SNR = 5dB</h2>
+    
+    <div class="audio-container">
+        <strong>Original Audio</strong>
+        <audio controls>
+            <source src="audio/original_audio_0.wav" type="audio/wav">
+            Your browser does not support the audio element.
+        </audio>
+    </div>
+
+    <div class="audio-container">
+        <strong>Baseline Decoder (e.g., Separate Source-Channel)</strong>
+        <audio controls>
+            <source src="audio/received_audio_0_3.wav" type="audio/wav">
+        </audio>
+    </div>
+
+    <div class="audio-container">
+        <strong>Proposed JSCC Decoder</strong>
+        <audio controls>
+            <source src="audio/received_audio_0_proposed.wav" type="audio/wav">
+        </audio>
+    </div>
+
+</body>
+</html>
