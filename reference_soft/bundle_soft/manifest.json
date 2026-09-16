@@ -1,0 +1,29 @@
+{
+  "run_id": "38d30276d8edc307",
+  "decision_mode": "soft",
+  "receiver_input": "llr",
+  "llr_convention": "L = 2*a*y/sigma^2, positive means bit = 1",
+  "llr_clip": 10.0,
+  "logpost_floor": -30.0,
+  "n_q": 2,
+  "parity_dim": 20,
+  "bits_per_frame": 40,
+  "bits_per_code": 10,
+  "frame_rate_hz": 75,
+  "bitrate_bps": 3000,
+  "sample_rate": 24000,
+  "channels": 1,
+  "encodec_model": "encodec_model_24khz",
+  "quantizer_bandwidth_kbps": 1.500001,
+  "bit_order": "MSB_first",
+  "frame_layout": "n_q code words (10 bits each, layer 0 first), then parity bits",
+  "parity_lookback_frames": 6,
+  "decoder_lookback_frames": 18,
+  "trained_channel": "awgn",
+  "trained_snr_range_db": [
+    -5.0,
+    8.0
+  ],
+  "trained_val_acc": 0.8513139081001282,
+  "torch_version": "2.12.1+cpu"
+}

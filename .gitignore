@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+tubitak/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python build files
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# CMake / compiled files
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+
+# Logs / temporary files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ML checkpoints / large model files
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+
+# Large arrays / generated data
+*.npy
+*.npz
+
+# Audio datasets / generated audio
+*.wav
+*.flac
+
+# Dataset folders
+dataset/
+datasets/
+data/raw/
+data/downloads/
+
+# GNU Radio generated/cache files
+*.grc.bak
+*.pyc
+gr-gsm/
+gnuradio-cache/
+
+# Large archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Core dumps
+core
+core.*
