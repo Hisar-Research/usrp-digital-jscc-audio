@@ -467,7 +467,7 @@ blocks:
       \n        self.sync_len = len(self.sync_bits)\n        self.sync_int = int(self.sync_bits,\
       \ 2)\n        self.sync_mask = (1 << self.sync_len) - 1\n\n        # Conservative\
       \ hard detector plus a soft-assisted rescue region.\n        self.hard_threshold\
-      \ = 1870\n        self.soft_candidate_threshold = 1900\n        self.soft_score_threshold\
+      \ = 1840\n        self.soft_candidate_threshold = 1900\n        self.soft_score_threshold\
       \ = 0.12\n\n        # Expected bipolar sync symbols for the DBPSK soft metric:\n\
       \        # bit 0 -> -1, bit 1 -> +1.\n        self.sync_bipolar = np.fromiter(\n\
       \            (1.0 if c == \"1\" else -1.0 for c in self.sync_bits),\n      \
@@ -554,11 +554,11 @@ blocks:
       rescue of previously observed real packets (e.g. 1872 errors, score 0.1457).'
     maxoutbuf: '0'
     minoutbuf: '0'
-    plain_bytes: '1126'
+    plain_bytes: '1502'
     skip_header_bits: '96'
-    soft_bits: '9008'
+    soft_bits: '12016'
     sync_tag: '"unused"'
-    vogeo_bytes: '1126'
+    vogeo_bytes: '1502'
   states:
     _io_cache: '(''4096-bit hard+soft low-SNR detector'', ''blk'', [(''skip_header_bits'',
       ''96''), (''plain_bytes'', ''488''), (''soft_bits'', ''3900''), (''vogeo_bytes'',
