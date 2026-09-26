@@ -54,8 +54,6 @@ Makefile
 *.npz
 
 # Audio datasets / generated audio
-*.wav
-*.flac
 
 # Dataset folders
 dataset/
