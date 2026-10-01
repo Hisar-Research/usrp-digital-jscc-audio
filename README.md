@@ -184,7 +184,7 @@ The receiver instead derives soft reliability information and passes it to the l
 
 ---
 
-## Soft VOGEO Receiver
+## Soft Receiver
 
 The proposed SDR receiver does **not** assume that a given USRP transmit gain corresponds to a specific SNR or \(E_s/N_0\).
 
@@ -228,7 +228,7 @@ This allows the decoder to adapt to the actual received metric distribution inst
 
 ---
 
-## Super-Packet Design
+## Packet Design
 
 The three methods are transmitted together as one experimental super-packet.
 
