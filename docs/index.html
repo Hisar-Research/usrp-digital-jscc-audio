@@ -67,7 +67,16 @@
         .setup-heading h2 { font-size: 1.45rem; margin-bottom: 2px; }
         .setup-heading p { margin: 0; color: var(--text-muted); font-size: 0.95rem; }
         .setup-figure { margin: 0; border-radius: 14px; overflow: hidden; background: #0f172a; border: 1px solid var(--border-color); }
-        .setup-figure img { display: block; width: 100%; height: clamp(260px, 46vw, 520px); object-fit: cover; object-position: center; background: #fff; }
+        .setup-figure img {
+            display: block;
+            width: 100%;
+            height: auto;       
+            max-height: 520px;       
+            object-fit: contain;      
+            background: #fff;
+            padding: 16px;             
+            box-sizing: border-box;
+        }
         .photo-placeholder { display: none; min-height: 300px; padding: 32px; place-items: center; text-align: center; color: #cbd5e1; background: radial-gradient(circle at 20% 20%, rgba(37,99,235,.22), transparent 30%), linear-gradient(135deg, #0f172a, #1e293b); }
         .photo-placeholder strong { display: block; color: #fff; font-size: 1.1rem; margin-bottom: 6px; }
         .setup-figure figcaption { background: #fff; color: var(--text-muted); padding: 12px 16px; font-size: 0.9rem; border-top: 1px solid var(--border-color); }
