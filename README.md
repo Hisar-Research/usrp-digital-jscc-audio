@@ -576,3 +576,15 @@ uncoded transmission
 ```
 
 under practical RF impairments and approximately equal transmitted-bit budgets.
+
+---
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Hisar Research.
+
+Third-party material keeps its own terms:
+
+* **EnCodec:** the system depends on Meta's EnCodec 24 kHz model, and `deploy_soft/bundle/codebooks.npy` contains codebooks from that model. These are covered by EnCodec's terms, not by this project's license. The PyPI package `encodec` 0.1.1 declares CC BY-NC 4.0, while the upstream repository's README states MIT for the code and gives no separate terms for the pretrained weights. Check EnCodec's current terms before any commercial use.
+* **LibriTTS:** the original speech clips in `deploy_soft/test_data/` and `docs/audio*/original_audio/` are from LibriTTS, released under CC BY 4.0. The received audio under `docs/` is derived from these clips.
+* **LibriSpeech:** the training audio is from LibriSpeech, released under CC BY 4.0.
