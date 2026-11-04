@@ -262,23 +262,6 @@ normalised correlation was 0.34, against 1.00 for a positive control, so no
 shared recording was found. This check covers recordings only; it does not rule
 out speakers appearing in both sets.
 
-## Licence
-
-This code has no licence yet, and one will be chosen when the paper is
-published. Until then, no permission to reuse or redistribute it is granted.
-
-Third-party material has its own terms:
-
-- **EnCodec:** this project depends on EnCodec, and `bundle/codebooks.npy`
-  contains codebooks from its 24 kHz model. The PyPI package `encodec` 0.1.1
-  used here declares CC BY-NC 4.0. The upstream repository's README states MIT
-  for the code and gives no separate terms for the pretrained weights. Check the
-  current terms before any commercial use.
-- **LibriTTS:** the clips in `test_data/` are from a corpus released under
-  CC BY 4.0.
-- **LibriSpeech:** the training audio and the prior's source are from a corpus
-  released under CC BY 4.0.
-
 ## References
 
 If you use this code, please cite EnCodec:
