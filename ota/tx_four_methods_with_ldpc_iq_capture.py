@@ -6,6 +6,8 @@ import socket
 import struct
 import time
 import json
+import csv
+import datetime
 
 import numpy as np
 import soundfile as sf
@@ -58,6 +60,20 @@ RX_HOST, RX_PORT = "127.0.0.1", 5002
 
 rf_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 header_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# Expected RF packets for offline loss accounting / ID matching. This is a
+# side-channel *transmit* log; it does not prove an RF detection.
+TX_CAPTURE_DIR = os.path.join(PROJECT_DIR, "ota_captures")
+os.makedirs(TX_CAPTURE_DIR, exist_ok=True)
+TX_MANIFEST = os.path.join(
+    TX_CAPTURE_DIR,
+    f"tx_expected_packets_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.csv"
+)
+_tx_manifest_file = open(TX_MANIFEST, "w", newline="", encoding="utf-8", buffering=1)
+_tx_manifest = csv.writer(_tx_manifest_file)
+_tx_manifest.writerow(["audio_id", "chunk_id_zero_based", "total_chunks",
+                       "valid_samples", "tx_unix_ns", "audio_source"])
+print(f"TX expected-packet CSV: {TX_MANIFEST}")
 
 
 # ============================================================
@@ -323,6 +339,7 @@ vogeo = VogeoTx(
 # Equal-channel-budget experiment:
 #   PLAIN baseline: EnCodec 3.0 kbps = 4 RVQ codebooks = 3000 useful bits/s
 #   CONV baseline : EnCodec 2.25 kbps = 3 RVQ codebooks, then punctured rate-3/4 FEC
+#   LDPC baseline : EnCodec 2.25 kbps = 3 RVQ codebooks, then rate-3/4 LDPC
 #   PROPOSED      : SOFT VOGEO = 3 EnCodec codebooks (30 bits/frame)
 #                   + 10 learned bits/frame = 40 bits/frame
 PLAIN_BANDWIDTH_KBPS = 3.0
@@ -510,6 +527,211 @@ NEXT_STATE, OUT_BITS = _build_trellis()
 
 
 # ============================================================
+# RATE-3/4 SYSTEMATIC LDPC
+#
+# Fairness target: EXACTLY the same source representation and RF
+# payload size as the terminated rate-3/4 convolutional baseline.
+#
+#   EnCodec source bits                  = 2250
+#   + 6 known zero padding bits          = 2256 LDPC information bits
+#   rate 3/4                             -> 3008 transmitted bits
+#   payload                              = 376 bytes
+#
+# H = [A | B], where:
+#   - A connects every information variable to 3 parity checks.
+#   - Every parity check has exactly 9 A-edges.
+#   - B is a dual-diagonal accumulator matrix.
+#
+# This is a deterministic custom LDPC matrix, NOT an IEEE/5G
+# standardized LDPC matrix. The receiver must use the exact same
+# construction below.
+# ============================================================
+
+LDPC_SOURCE_BITS = CONV_INFO_BITS                     # 2250
+LDPC_ZERO_PAD_BITS = TAIL_BITS                        # 6
+LDPC_K = LDPC_SOURCE_BITS + LDPC_ZERO_PAD_BITS       # 2256
+LDPC_N = CONV_PHYSICAL_BITS                           # 3008
+LDPC_M = LDPC_N - LDPC_K                              # 752
+LDPC_RATE = LDPC_K / LDPC_N                           # 0.75
+LDPC_INFO_DEGREE = 3
+
+if LDPC_K * 4 != LDPC_N * 3:
+    raise RuntimeError(
+        f"LDPC dimensions are not exactly rate 3/4: "
+        f"k={LDPC_K}, n={LDPC_N}"
+    )
+
+if LDPC_SOURCE_BITS != CONV_INFO_BITS:
+    raise RuntimeError(
+        "LDPC and convolutional branches must use the same 2250 source bits"
+    )
+
+
+def _build_ldpc_info_checks():
+    """
+    Return [LDPC_K, 3] check-node indices for the systematic LDPC code.
+
+    The mapping is deterministic and regular:
+      - each information variable has degree 3
+      - each check receives exactly 9 information-variable edges
+      - no information variable has duplicate check connections
+    """
+    j = np.arange(
+        LDPC_K,
+        dtype=np.int64,
+    )
+
+    group = j // LDPC_M
+    r = j % LDPC_M
+
+    c0 = r
+    c1 = (
+        87 * r
+        + 103
+        + 128 * group
+    ) % LDPC_M
+    c2 = (
+        75 * r
+        + 561
+        + 448 * group
+    ) % LDPC_M
+
+    checks = np.stack(
+        (c0, c1, c2),
+        axis=1,
+    ).astype(np.int32)
+
+    if np.any(checks[:, 0] == checks[:, 1]) or \
+       np.any(checks[:, 0] == checks[:, 2]) or \
+       np.any(checks[:, 1] == checks[:, 2]):
+        raise RuntimeError(
+            "LDPC construction produced duplicate checks for an information bit"
+        )
+
+    check_degrees = np.bincount(
+        checks.reshape(-1),
+        minlength=LDPC_M,
+    )
+
+    if not np.all(check_degrees == 9):
+        raise RuntimeError(
+            "LDPC information-side check degrees are not all 9"
+        )
+
+    return checks
+
+
+LDPC_INFO_CHECKS = _build_ldpc_info_checks()
+
+
+def ldpc_encode(source_bits):
+    """
+    Systematic rate-3/4 LDPC encoder.
+
+    Input:
+        2250 source bits from the same 3-codebook EnCodec representation
+        used by the convolutional branch.
+
+    Output:
+        3008 coded bits:
+            [2250 source bits | 6 known zeros | 752 parity bits]
+
+    Parity equations use a dual-diagonal accumulator:
+        A_i u XOR p_i XOR p_{i-1} = 0
+    with p_{-1}=0.
+    """
+    source_bits = np.asarray(
+        source_bits,
+        dtype=np.uint8,
+    ).reshape(-1)
+
+    if source_bits.size != LDPC_SOURCE_BITS:
+        raise ValueError(
+            f"Expected {LDPC_SOURCE_BITS} LDPC source bits, "
+            f"got {source_bits.size}"
+        )
+
+    if np.any(
+        (source_bits != 0)
+        & (source_bits != 1)
+    ):
+        raise ValueError(
+            "LDPC source is not binary"
+        )
+
+    u = np.concatenate(
+        (
+            source_bits,
+            np.zeros(
+                LDPC_ZERO_PAD_BITS,
+                dtype=np.uint8,
+            ),
+        )
+    )
+
+    if u.size != LDPC_K:
+        raise RuntimeError(
+            f"LDPC information vector has {u.size} bits, "
+            f"expected {LDPC_K}"
+        )
+
+    # syndrome = A @ u (mod 2)
+    syndrome = np.zeros(
+        LDPC_M,
+        dtype=np.uint8,
+    )
+
+    for edge in range(LDPC_INFO_DEGREE):
+        np.bitwise_xor.at(
+            syndrome,
+            LDPC_INFO_CHECKS[:, edge],
+            u,
+        )
+
+    # Solve B p = syndrome over GF(2) for the dual-diagonal B.
+    parity = np.bitwise_xor.accumulate(
+        syndrome
+    ).astype(np.uint8)
+
+    coded = np.concatenate(
+        (
+            u,
+            parity,
+        )
+    )
+
+    if coded.size != LDPC_N:
+        raise RuntimeError(
+            f"LDPC coded bits={coded.size}, expected {LDPC_N}"
+        )
+
+    # Internal parity-check verification.
+    check = syndrome.copy()
+    check ^= parity
+    check[1:] ^= parity[:-1]
+
+    if np.any(check):
+        raise RuntimeError(
+            "LDPC encoder parity-check verification failed"
+        )
+
+    return coded
+
+
+LDPC_USEFUL_BITS = LDPC_N                            # 3008
+LDPC_BYTES = math.ceil(
+    LDPC_USEFUL_BITS / 8
+)                                                    # 376
+LDPC_PHYSICAL_BITS = LDPC_BYTES * 8                 # 3008
+LDPC_PAD_BITS = LDPC_PHYSICAL_BITS - LDPC_USEFUL_BITS  # 0
+
+if LDPC_BYTES != CONV_BYTES:
+    raise RuntimeError(
+        f"LDPC payload={LDPC_BYTES} B but Conv payload={CONV_BYTES} B"
+    )
+
+
+# ============================================================
 # SOFT VOGEO TX
 #
 # SOFT VOGEO bundle transmitter format:
@@ -548,39 +770,46 @@ VOGEO_PAD_BITS = (
 # ONE SUPER-PACKET
 #
 # plain 3 kbps = 375 B
-# conv(3/4)      = 376 B
-# soft VOGEO     = 375 B
+# conv(3/4)    = 376 B
+# ldpc(3/4)    = 376 B
+# soft VOGEO   = 375 B
 #
-# total = 1126 B = 9008 RF bits
+# total = 1502 B = 12016 RF bits
 # ============================================================
 
+# Four cyclic rotations keep each method from always occupying the same
+# position inside the RF super-packet.
 ORDERS = (
-    ("plain", "conv", "vogeo"),
-    ("conv", "vogeo", "plain"),
-    ("vogeo", "plain", "conv"),
+    ("plain", "conv", "ldpc", "vogeo"),
+    ("conv", "ldpc", "vogeo", "plain"),
+    ("ldpc", "vogeo", "plain", "conv"),
+    ("vogeo", "plain", "conv", "ldpc"),
 )
 
 SEGMENT_BYTES = {
     "plain": PLAIN_BYTES,
     "conv": CONV_BYTES,
+    "ldpc": LDPC_BYTES,
     "vogeo": VOGEO_BYTES,
 }
 
 SEGMENT_PHYSICAL_BITS = {
     "plain": PLAIN_PHYSICAL_BITS,
     "conv": CONV_PHYSICAL_BITS,
+    "ldpc": LDPC_PHYSICAL_BITS,
     "vogeo": VOGEO_PHYSICAL_BITS,
 }
 
 SUPER_PACKET_BYTES = (
     PLAIN_BYTES
     + CONV_BYTES
+    + LDPC_BYTES
     + VOGEO_BYTES
-)                                                   # 1126
+)                                                   # 1502
 
 SUPER_PACKET_BITS = (
     SUPER_PACKET_BYTES * 8
-)                                                   # 9008
+)                                                   # 12016
 
 
 # ============================================================
@@ -600,8 +829,8 @@ HEADER_SIZE = struct.calcsize(
 # TIMING / OUTPUT
 # ============================================================
 
-CHUNK_INTERVAL_S = 0.25
-AUDIO_INTERVAL_S = 5
+CHUNK_INTERVAL_S = 1
+AUDIO_INTERVAL_S = 3
 
 ORIGINAL_DIR = "original_audio"
 os.makedirs(
@@ -831,6 +1060,34 @@ def pack_conv(codes_np):
     return payload
 
 
+def pack_ldpc(codes_np):
+    """
+    LDPC uses the exact same frame-major 2250 source bits as Conv,
+    then appends six known zeros internally and encodes them at rate 3/4.
+    """
+    info_bits = codes_to_conv_info_bits(
+        codes_np
+    )
+
+    coded_bits = ldpc_encode(
+        info_bits
+    )
+
+    payload = np.packbits(
+        coded_bits,
+        bitorder="big",
+    ).tobytes()
+
+    if len(payload) != LDPC_BYTES:
+        raise RuntimeError(
+            f"LDPC payload="
+            f"{len(payload)} B, "
+            f"expected {LDPC_BYTES} B"
+        )
+
+    return payload
+
+
 def pack_vogeo(vogeo_bits):
     """
     Hard VOGEO output is already a hard uint8 bit matrix:
@@ -983,11 +1240,11 @@ def get_chunk(
 
 
 # ============================================================
-# ONE ENCODEC PASS -> THREE METHODS
+# ONE ENCODEC PASS -> FOUR METHODS
 # ============================================================
 
 @torch.no_grad()
-def encode_all_three(chunk):
+def encode_all_four(chunk):
     """
     ONE EnCodec encoder pass, then TWO quantizer operating points.
 
@@ -997,16 +1254,24 @@ def encode_all_three(chunk):
     CONV:
         z -> EnCodec quantizer at the VOGEO bundle bandwidth (2.25 kbps)
           -> 3 codebooks -> 2250 information bits
-          -> terminated K=7 mother code + rate-3/4 puncturing
+          -> 6 termination zeros
+          -> rate-3/4 punctured convolutional code
+          -> 3008 transmitted coded bits.
+
+    LDPC:
+        uses the SAME 2.25-kbps / 3-codebook source as Conv
+          -> 2250 information bits
+          -> 6 known zero padding bits
+          -> systematic rate-3/4 LDPC
           -> 3008 transmitted coded bits.
 
     PROPOSED / SOFT VOGEO:
         uses the SAME original continuous latent z and the SAME 2.25-kbps
-        3-codebook codes as the Conv source, then adds 10 learned bits/frame
+        3-codebook codes as Conv/LDPC, then adds 10 learned bits/frame
         -> 3000 transmitted bits.
 
-    This gives an approximately equal 3-kbit/s channel budget:
-        plain=3000, conv=3008 physical, proposed=3000 bits/chunk.
+    Channel budgets per 1-s chunk:
+        plain=3000, conv=3008, ldpc=3008, proposed=3000 bits.
     """
     if chunk.ndim != 2:
         raise ValueError(
@@ -1029,7 +1294,7 @@ def encode_all_three(chunk):
 
     # --------------------------------------------------------
     # 2.25-kbps / 3-codebook representation:
-    # used by Conv and SOFT VOGEO.
+    # used by Conv, LDPC, and SOFT VOGEO.
     # --------------------------------------------------------
     q_protected = model.quantizer(
         z,
@@ -1100,6 +1365,10 @@ def encode_all_three(chunk):
         codes_protected_np
     )
 
+    ldpc_payload = pack_ldpc(
+        codes_protected_np
+    )
+
     # SOFT VOGEO TX keeps the original z + 3-codebook input.
     vogeo_bits = vogeo.encode(
         z,
@@ -1118,6 +1387,7 @@ def encode_all_three(chunk):
     return {
         "plain": plain_payload,
         "conv": conv_payload,
+        "ldpc": ldpc_payload,
         "vogeo": vogeo_payload,
     }, elapsed
 
@@ -1158,7 +1428,7 @@ print(
     "============================================================"
 )
 print(
-    "THREE-METHOD TX-GAIN SOFT SUPER-PACKET TX | 30+10 + CONV 3/4"
+    "FOUR-METHOD TX-GAIN SOFT SUPER-PACKET TX | 30+10 + CONV 3/4 + LDPC 3/4"
 )
 print(
     "============================================================"
@@ -1182,12 +1452,12 @@ print(
     PLAIN_N_Q,
 )
 print(
-    "Conv/VOGEO source BW   =",
+    "Conv/LDPC/VOGEO BW     =",
     PROTECTED_BANDWIDTH_KBPS,
     "kbps",
 )
 print(
-    "Conv/VOGEO source n_q  =",
+    "Conv/LDPC/VOGEO n_q    =",
     PROTECTED_N_Q,
 )
 print(
@@ -1230,6 +1500,32 @@ print(
 print(
     "  physical bits        =",
     CONV_PHYSICAL_BITS,
+)
+print()
+print("LDPC: ENCODEC 2.25 KBPS + RATE-3/4 SYSTEMATIC")
+print(
+    "  source bits          =",
+    LDPC_SOURCE_BITS,
+)
+print(
+    "  zero padding bits    =",
+    LDPC_ZERO_PAD_BITS,
+)
+print(
+    "  LDPC k / n           =",
+    f"{LDPC_K} / {LDPC_N}",
+)
+print(
+    "  code rate            =",
+    f"{LDPC_RATE:.6f}",
+)
+print(
+    "  bytes                =",
+    LDPC_BYTES,
+)
+print(
+    "  physical bits        =",
+    LDPC_PHYSICAL_BITS,
 )
 print()
 print("PROPOSED SOFT VOGEO")
@@ -1337,7 +1633,7 @@ try:
             (
                 payloads,
                 encode_time,
-            ) = encode_all_three(
+            ) = encode_all_four(
                 chunk
             )
 
@@ -1373,6 +1669,10 @@ try:
                     GRC_PORT,
                 ),
             )
+            # Record the *transmitted* packet ID. Use with RX detection CSV
+            # after the run; no assumption is made that the RF packet arrived.
+            _tx_manifest.writerow([audio_id, chunk_id, total_chunks,
+                                   valid_samples, time.time_ns(), audio_path])
 
             print(
                 f"TX | "
@@ -1412,3 +1712,4 @@ except KeyboardInterrupt:
 finally:
     rf_sock.close()
     header_sock.close()
+    _tx_manifest_file.close()

@@ -1,590 +1,136 @@
-# Experimental SDR Testbed for Robust Semantic Audio Transmission
+# Robust Semantic Audio Communication: Simulation and SDR Testbed
 
-This repository contains the SDR implementation used to experimentally evaluate three digital audio transmission schemes over a real wireless link using two USRP B210 software-defined radios and GNU Radio.
+Research code for **channel-robust neural speech transmission** using Meta's [EnCodec](https://github.com/facebookresearch/encodec) audio codec, learned protection bits, conventional forward-error correction (FEC), and a USRP/GNU Radio over-the-air (OTA) testbed.
 
-The evaluated methods are:
+The project has two complementary parts:
 
-* **Proposed** – learned robust semantic audio transmission
-* **Conv** – conventional convolutionally coded transmission
-* **Plain / 3 kbps** – uncoded EnCodec transmission
+1. **Software evaluation:** controlled AWGN and fading-channel experiments with exported learned models, conventional baselines, and speech-quality metrics. The simulation implementation and its detailed instructions are maintained in [`deploy_soft/README.md`](deploy_soft/README.md).
+2. **Over-the-air evaluation:** a digital BPSK link using USRP B210 radios and GNU Radio. The current experiment compares four methods in the same RF super-packet and can save detected-packet IQ, demodulator soft metrics, and estimated log-likelihood ratios (LLRs). See **[`ota/README.md`](ota/README.md)** for the setup and reproduction workflow.
 
-The system uses **EnCodec** for speech representation and compares the three methods under approximately equal transmitted-bit budgets.
+> **Scope:** This is a research prototype, not a real-time voice-call application. The simulation and OTA experiments have different baselines and assumptions; their results should not be compared as though they use identical channels, synchronization, or receiver knowledge.
 
----
-
-## System Overview
-
-The complete experimental chain is:
+## System at a glance
 
 ```text
-LibriTTS Audio
-      |
-      v
-   EnCodec
-      |
-      v
-+------------------------------+
-| Plain | Conv | Proposed      |
-+------------------------------+
-      |
-      v
- Python TX
-      |
-      v
- GNU Radio TX
-      |
-      v
- USRP B210
-      |
-   Wireless Link
-      |
-      v
- USRP B210
-      |
-      v
- GNU Radio RX
-      |
-      v
- Python RX
-      |
-      v
-Reconstructed Audio
-      |
-      v
-PESQ / ESTOI / SI-SDR
+                         Speech / LibriTTS
+                                |
+                          EnCodec 24 kHz
+                                |
+             +------------------+------------------+
+             |                                     |
+       Software simulation                      OTA testbed
+       deploy_soft/                             ota/
+             |                                     |
+      AWGN / Rayleigh                    Four bitstreams per chunk
+      + channel models                   Uncoded | Conv | LDPC | Learned
+             |                                     |
+      Soft-input decoding                     RF super-packet
+             |                                     |
+      PESQ / ESTOI / ...                   GNU Radio BPSK TX
+                                                   |
+                                                USRP B210
+                                                   |
+                                                RF channel
+                                                   |
+                                                USRP B210
+                                                   |
+                                          GNU Radio soft RX
+                                                   |
+                                      Soft decoding and reconstruction
+                                                   |
+                                        PESQ / ESTOI; IQ/LLR capture
 ```
 
----
+[OTA testbed block diagram](docs/OTA-jscc-testbed.drawio.png) · [Testbed photo](docs/setup_image.jpeg) · [Audio demonstration](docs/index.html)
 
-## Dataset
+## Current OTA transmission methods
 
-The experiments use the **LibriTTS `test-clean`** dataset.
+All four methods operate on **1-second, 24-kHz audio chunks**, with 75 EnCodec frames per chunk and 10 bits per RVQ index. The methods are transmitted together for experimental comparison, not as four simultaneous independent user streams.
 
-The dataset is **not included in this repository and must be downloaded separately**.
+| CSV label | Method | EnCodec source | Protection | Payload per 1-s chunk |
+|---|---|---|---|---:|
+| `proposed` | Learned soft-input protection (VOGEO) | 3 RVQ codebooks, 2.25 kbps | 10 learned parity bits/frame | **3,000 bits (375 B)** |
+| `conv` | Punctured convolutional FEC | 3 codebooks, 2.25 kbps | K=7, (133,171) octal, nominal rate 3/4; terminated | **3,008 bits (376 B)** |
+| `ldpc` | Systematic LDPC FEC | 3 codebooks, 2.25 kbps | Custom (3008,2256) code; soft normalized min-sum decoder | **3,008 bits (376 B)** |
+| `3` | Uncoded EnCodec | 4 codebooks, 3.0 kbps | None; hard decision on received soft values | **3,000 bits (375 B)** |
 
-Download LibriTTS from the official OpenSLR repository:
+The **combined four-method super-packet** is **1,502 bytes / 12,016 payload bits** before GNU Radio framing and synchronization overhead. Method order rotates across chunks. The learned, convolutional, and LDPC receivers use soft information; the uncoded branch slices received values into bits.
+
+The OTA learned model is the **30 source bits + 10 learned bits per frame** variant, using the compatible soft bundle in `reference_soft/bundle_3_out_4/`. Other bundles in this repository are separate model variants and must not be interchanged.
+
+**Important:** USRP transmit gain is an **experimental gain setting**, **not** measured SNR or \(E_s/N_0\). The OTA plots use transmit gain on the x-axis. The simulation uses modeled \(E_s/N_0\) and must be labeled accordingly.
+
+## Repository layout
 
 ```text
-https://www.openslr.org/60/
+.
+├── README.md                         # Overview and navigation (this file)
+├── deploy_soft/                      # Current software simulation, assets, weights
+│   ├── README.md                     # Maintained separately by its contributor
+│   ├── selftest_sim_v3.py
+│   ├── plot_sim_v3.py
+│   ├── bundle/                       # Exported soft learned model
+│   └── test_data/                    # Included example/evaluation speech clips
+├── ota/
+│   ├── README.md                     # Detailed USRP OTA setup and capture guide
+│   ├── tx_four_methods_with_ldpc_iq_capture.py
+│   ├── rx_four_methods_soft_ldpc_iq_llr_capture.py
+│   ├── bpsk_jscc_RX_iq_capture.grc
+│   ├── graphs.py
+│   ├── measurement_30 oct/           # Saved metric tables
+│   └── measurement_before_30 oct/    # Earlier metric tables
+├── reference_soft/                  # Soft VOGEO transmitter/receiver and bundles
+│   ├── bundle_3_out_4/              # 3 codebooks + 10 parity bits (current OTA)
+│   └── bundle_soft/                 # Different model configuration (not current OTA)
+├── deepJSCC_voice_hard_1_2/        # Earlier hard-decision implementation
+├── benchmark_processing_latency.py # Offline three-method processing benchmark
+├── benchmark_tx_stage_latency.py   # Offline TX stage benchmark
+├── docs/                            # Diagrams, demo and audio examples
+└── LICENSE
 ```
 
-The required archive is:
+The root-level latency scripts benchmark **three** methods from an earlier comparison; they should not be presented as four-method OTA latency measurements. The `deploy_soft/` simulation uses its own baseline definitions and has its own results and instructions.
 
-```text
-test-clean.tar.gz
-```
+## Getting started
 
-It can also be downloaded directly from the terminal:
+### A. Explore the software simulation
+
+The simulation can be run on a computer without USRP hardware. Follow the environment, version and experiment instructions in [`deploy_soft/README.md`](deploy_soft/README.md). For example, after installing its listed dependencies:
 
 ```bash
-wget https://www.openslr.org/resources/60/test-clean.tar.gz
+cd deploy_soft
+python3 selftest_sim_v3.py --selftest
+python3 selftest_sim_v3.py --test_dir test_data --seconds 0 --trials 1 \
+    --max_files 2 --snrs 0 3 --channels awgn rayleigh \
+    --mismatch_db 0 --out_prefix smoke
+python3 plot_sim_v3.py --prefix smoke --out_dir figs_smoke --fmt png
 ```
 
-Extract it using:
+The exported bundle and test clips are included under `deploy_soft/`. The detailed simulation README is the authoritative reference for its method definitions, dependencies, parameters and reported software results.
 
-```bash
-tar -xzf test-clean.tar.gz
-```
+### B. Reproduce the OTA measurements
 
-The expected dataset directory is:
+The OTA test requires **two compatible USRP radios (tested configuration: B210)**, GNU Radio/UHD, the 24-kHz EnCodec model, and LibriTTS `test-clean` speech. The receiver writes decoded audio and metrics, and can capture post-Costas complex symbols, demodulator metrics and LLR arrays for later processing.
 
-```text
-datasets/
-└── LibriTTS/
-    └── test-clean/
-```
+**Start with [`ota/README.md`](ota/README.md).** It documents the required folder-layout adjustment for the scripts in this archive, dependencies, UDP ports, start order, RF packet format, capture files, and plotting. Do not attempt to reproduce the OTA experiment from the simulation quick-start commands above.
 
-The experiment selects:
+## Evaluation and reproducibility
 
-```text
-Duration >= 8.0 s
-Duration < 15.0 s
-```
+- **Speech quality/intelligibility:** reconstructed audio is evaluated with PESQ and ESTOI; saved OTA data also include SI-SDR tables used for plotting. The current OTA receiver computes PESQ and ESTOI directly; SI-SDR is not calculated by that RX script.
+- **Simulation:** AWGN/Rayleigh experiments and their evaluation options are documented in `deploy_soft/README.md`.
+- **OTA:** saved tables under `ota/measurement_30 oct/` contain the four method labels. `ota/graphs.py` plots PESQ, ESTOI and SI-SDR against TX gain. A separate gain=89 reference is handled as a horizontal reference rather than a regular sweep point.
+- **Missing RF detections:** a non-detected packet has no genuine received IQ/LLR recording. The OTA code logs expected transmit packets and observed detections separately; reconstructed speech uses silence for missing chunks where the corresponding audio state is known.
 
-and uses the **first 100 valid audio files** after filtering.
+For any paper figure, record the dataset subset, TX/RX gain settings, receiver configuration, bundle `run_id`, packet detection counts, and metric/CI calculation. The repository contains scripts and saved measurements, but the exact performance reported in a manuscript depends on the selected measurement run.
 
-All speech signals are converted to:
+## Model and data notes
 
-```text
-Sample rate: 24 kHz
-Mono
-```
+The OTA code searches for LibriTTS `test-clean` in a local `datasets/` directory. The full LibriTTS dataset is **not shipped here**; obtain it from [OpenSLR 60](https://www.openslr.org/60/). The `deploy_soft/test_data/` directory holds a separate set of example/evaluation clips for the simulation workflow.
 
-before EnCodec processing.
+Trained model exports are included for inference/evaluation; model-training code and training checkpoints are **not** included with `deploy_soft/` as documented in its README. EnCodec model weights may be fetched on first use depending on the local environment.
 
----
+## License and attribution
 
-## Audio Processing
+Repository code is licensed under the [Apache License 2.0](LICENSE) (Copyright 2026 Hisar Research), subject to the included license text. **Third-party code, pretrained weights, datasets and audio retain their own terms**, including EnCodec and LibriTTS/LibriSpeech. Check the relevant upstream licenses before redistribution or commercial use.
 
-The experiment uses the pretrained **24-kHz EnCodec model**.
-
-Each speech signal is encoded into discrete neural audio representations before transmission.
-
-The three transmission methods use different ways of spending approximately the same communication budget.
-
-```text
-Plain       : 3000 transmitted bits
-Convolution : 3008 transmitted bits
-Proposed    : 3000 transmitted bits
-```
-
-This allows comparison of learned protection against conventional channel coding under approximately equal transmission cost.
-
----
-
-## Transmission Methods
-
-### 1. Plain
-
-The plain baseline transmits the EnCodec representation directly without channel coding.
-
-```text
-Method label: 3
-Bits:         3000
-```
-
-At the receiver, the received BPSK metrics are converted directly to hard bits.
-
-```text
-metric >= 0 -> 1
-metric <  0 -> 0
-```
-
-No error-correcting code is applied.
-
----
-
-### 2. Convolutional Coding
-
-The conventional baseline protects the EnCodec representation using convolutional coding.
-
-```text
-Method label: conv
-Coded bits:  3008
-```
-
-The receiver uses the received soft BPSK metrics for **soft-input Viterbi decoding**.
-
-This provides a conventional digital channel-coding baseline for comparison with the learned method.
-
----
-
-### 3. Proposed Method
-
-The proposed method introduces learned redundancy into the EnCodec representation.
-
-```text
-Method label: proposed
-Bits:         3000
-```
-
-Unlike the plain method, the received BPSK values are not immediately converted into hard bits.
-
-The receiver instead derives soft reliability information and passes it to the learned decoder.
-
----
-
-## Soft Receiver
-
-The proposed SDR receiver does **not** assume that a given USRP transmit gain corresponds to a specific SNR or \(E_s/N_0\).
-
-Instead, reliability is estimated directly from the received BPSK payload metrics.
-
-A two-component Gaussian model is fitted:
-
-```text
-m | bit=0 ~ N(mu0, sigma²)
-m | bit=1 ~ N(mu1, sigma²)
-```
-
-using a blind EM procedure.
-
-The estimated parameters are converted into bit LLRs:
-
-```text
-             (m - mu0)^2 - (m - mu1)^2
-LLR(m) =    -----------------------------
-                       2 sigma²
-```
-
-where:
-
-```text
-positive LLR -> bit 1
-negative LLR -> bit 0
-```
-
-The magnitude of the LLR represents the estimated reliability.
-
-Before being passed to the learned decoder, the LLRs are clipped to:
-
-```text
-[-50, +50]
-```
-
-Therefore, the proposed decoder receives **soft values**, not only hard binary decisions.
-
-This allows the decoder to adapt to the actual received metric distribution instead of assuming that USRP TX gain is equivalent to SNR.
-
----
-
-## Packet Design
-
-The three methods are transmitted together as one experimental super-packet.
-
-The RF payload is:
-
-```text
-1126 bytes
-9008 bits
-```
-
-The super-packet contains the representations required for:
-
-```text
-Proposed
-Plain
-Convolutional
-```
-
-The transmission order may be varied between packets to avoid systematically favoring one method because of its location inside the RF payload.
-
-The receiver identifies the order from the corresponding metadata.
-
----
-
-## Metadata Header
-
-Metadata is transmitted separately from the RF payload.
-
-It contains information required to associate received packets with the original speech signal and audio chunk.
-
-Typical fields include:
-
-```text
-audio_id
-chunk_id
-total_chunks
-valid_samples
-method order
-TX gain
-```
-
-This allows the receiver to reconstruct each audio file correctly even when packets are received in different method orders.
-
----
-
-## UDP Interfaces
-
-Python and GNU Radio communicate using UDP sockets.
-
-The transmitter sends prepared RF payloads to GNU Radio.
-
-GNU Radio performs:
-
-```text
-packet framing
-BPSK modulation
-pulse shaping
-USRP transmission
-```
-
-At the receiver, GNU Radio performs:
-
-```text
-USRP reception
-timing recovery
-carrier recovery
-packet synchronization
-payload extraction
-```
-
-and forwards the recovered payload metrics to the Python receiver.
-
-The Python receiver then performs the appropriate decoding operation for each method.
-
----
-
-## Required Project Structure
-
-A typical setup is:
-
-```text
-project/
-│
-├── tx/
-├── rx/
-├── models/
-├── results/
-│
-├── datasets/
-│   └── LibriTTS/
-│       └── test-clean/
-│
-├── original_audio/
-├── received_audio/
-│
-├── *.py
-├── *.grc
-└── README.md
-```
-
-The LibriTTS dataset itself is not stored in the Git repository.
-
----
-
-## Python Dependencies
-
-The main Python dependencies include:
-
-```text
-numpy
-scipy
-pandas
-torch
-torchaudio
-encodec
-soundfile
-librosa
-pesq
-pystoi
-```
-
-Install the required packages in the Python environment used by the experiment.
-
-GNU Radio and UHD must also be installed for the SDR experiment.
-
-Check that the B210 devices are detected using:
-
-```bash
-uhd_find_devices
-```
-
-or:
-
-```bash
-uhd_usrp_probe
-```
-
----
-
-## Running the Experiment
-
-### 1. Download the dataset
-
-Download and extract LibriTTS `test-clean` as described in the **Dataset** section.
-
-The expected location is:
-
-```text
-datasets/LibriTTS/test-clean/
-```
-
----
-
-### 2. Connect the USRPs
-
-Connect the transmitter and receiver USRP B210 devices.
-
-Verify that both devices are detected.
-
----
-
-### 3. Start GNU Radio
-
-Start the GNU Radio transmitter and receiver flowgraphs.
-
-The receiver should be running before starting the Python transmission process.
-
----
-
-### 4. Start the Python receiver
-
-Run the three-method receiver.
-
-For example:
-
-```bash
-python3 rx_three_method_TXGAIN_30plus10_SOFT_conv34_BLIND_EM.py --tx-gain <GAIN>
-```
-
-where `<GAIN>` is the USRP transmit-gain value corresponding to the current experiment.
-
----
-
-### 5. Start the transmitter
-
-Run the transmitter script using the same experimental configuration.
-
-The selected LibriTTS files are encoded and transmitted through the SDR testbed.
-
----
-
-### 6. Repeat for each TX gain
-
-Repeat the experiment for the desired USRP transmit-gain operating points.
-
-The TX gain values are treated as **experimental RF operating conditions** and are not converted into assumed SNR values.
-
----
-
-## Output
-
-The experiment stores reconstructed audio for all three methods.
-
-Typical filenames are:
-
-```text
-received_audio_<id>_proposed.wav
-received_audio_<id>_conv.wav
-received_audio_<id>_3.wav
-```
-
-The original reference audio is stored separately.
-
-Metric results are saved as CSV files.
-
-Typical method labels are:
-
-```text
-proposed
-conv
-3
-```
-
----
-
-## Saved Experimental Results
-
-The saved experimental results used in this project are available here:
-
-```text
-https://drive.google.com/drive/folders/1ObEJoAW_-GTYUfZdp0jjQLMnjmCX27nh?usp=sharing
-```
-
-The Google Drive folder contains the saved outputs from the experiments, including the result files used for evaluation and figure generation.
-
-This allows the experimental results to be inspected without rerunning the complete over-the-air SDR experiment.
-
----
-
-## Evaluation Metrics
-
-The reconstructed speech is evaluated using three objective metrics.
-
-### ESTOI
-
-Extended Short-Time Objective Intelligibility measures speech intelligibility.
-
-Higher values indicate better intelligibility.
-
----
-
-### PESQ
-
-Perceptual Evaluation of Speech Quality measures perceptual speech quality.
-
-Higher values indicate better quality.
-
----
-
-### SI-SDR
-
-Scale-Invariant Signal-to-Distortion Ratio measures waveform reconstruction quality.
-
-It is reported in dB.
-
-Higher values indicate better reconstruction.
-
----
-
-## Experimental Fairness
-
-The three transmission schemes are designed to use approximately the same RF transmission budget.
-
-```text
-Proposed : 3000 bits
-Plain    : 3000 bits
-Conv     : 3008 bits
-```
-
-Therefore, improvements from the proposed approach are not obtained by simply transmitting substantially more physical bits.
-
-The comparison investigates how the available redundancy is used:
-
-```text
-Plain
-    -> no explicit redundancy
-
-Conv
-    -> conventional channel-coding redundancy
-
-Proposed
-    -> learned redundancy
-```
-
----
-
-## Important Experimental Note
-
-The SDR experiment does **not** interpret USRP transmit gain as SNR.
-
-In particular:
-
-```text
-TX gain != SNR
-TX gain != Es/N0
-```
-
-USRP transmit gain controls the RF transmit-chain operating point.
-
-The actual received signal is affected by:
-
-```text
-path loss
-antenna characteristics
-receiver gain
-hardware response
-noise
-frequency offset
-timing errors
-synchronization
-multipath
-other RF impairments
-```
-
-For this reason, SDR results are reported against the actual experimental transmit-gain setting.
-
-For the proposed method, channel reliability is estimated directly from the received BPSK soft metrics using the blind Gaussian model described above.
-
----
-
-## Purpose
-
-The purpose of this repository is to provide the implementation used to experimentally investigate whether learned protection of neural audio representations can offer improved robustness over conventional digital transmission methods.
-
-The testbed complements software simulations by evaluating the methods over a real wireless link using USRP B210 software-defined radios.
-
-The experiment therefore compares:
-
-```text
-learned semantic protection
-vs.
-conventional channel coding
-vs.
-uncoded transmission
-```
-
-under practical RF impairments and approximately equal transmitted-bit budgets.
-
----
-
-## License
-
-This project is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Hisar Research.
-
-Third-party material keeps its own terms:
-
-* **EnCodec:** the system depends on Meta's EnCodec 24 kHz model, and `deploy_soft/bundle/codebooks.npy` contains codebooks from that model. These are covered by EnCodec's terms, not by this project's license. The PyPI package `encodec` 0.1.1 declares CC BY-NC 4.0, while the upstream repository's README states MIT for the code and gives no separate terms for the pretrained weights. Check EnCodec's current terms before any commercial use.
-* **LibriTTS:** the original speech clips in `deploy_soft/test_data/` and `docs/audio*/original_audio/` are from LibriTTS, released under CC BY 4.0. The received audio under `docs/` is derived from these clips.
-* **LibriSpeech:** the training audio is from LibriSpeech, released under CC BY 4.0.
+For method-specific questions, first consult [`deploy_soft/README.md`](deploy_soft/README.md) for the simulation or [`ota/README.md`](ota/README.md) for the RF implementation. A paper reference can be added once a citable version is available.

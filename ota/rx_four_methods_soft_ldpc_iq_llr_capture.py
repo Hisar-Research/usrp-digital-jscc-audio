@@ -5,6 +5,10 @@ import socket
 import struct
 import argparse
 import json
+import csv
+import time
+import select
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -73,9 +77,18 @@ sock.bind(
     )
 )
 
+# Receive buffers help when EnCodec/LDPC decoding temporarily stalls the loop.
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
 sock.settimeout(
     0.25
 )
+
+# IQF1 contains fragmented complex64 *post-Costas symbols*, not ADC-rate USRP IQ.
+IQ_HOST, IQ_PORT = "127.0.0.1", 5003
+iq_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+iq_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+iq_sock.bind((IQ_HOST, IQ_PORT))
+iq_sock.setblocking(False)
 
 
 # ============================================================
@@ -83,7 +96,7 @@ sock.settimeout(
 # ============================================================
 
 parser = argparse.ArgumentParser(
-    description="Three-method equal-budget SOFT receiver for a USRP TX-gain sweep"
+    description="Four-method equal-budget SOFT receiver for a USRP TX-gain sweep"
 )
 parser.add_argument(
     "--tx-gain",
@@ -112,10 +125,11 @@ if VOGEO_LLR_CLIP <= 0.0:
 
 # TX_GAIN_DB is an experimental control/label only. Never convert it to gamma.
 
-# Internal method keys; CSV labels are proposed, conv, 3.
+# Internal method keys; CSV labels are proposed, conv, ldpc, 3.
 METHODS = (
     "vogeo",
     "conv",
+    "ldpc",
     "plain",
 )
 
@@ -124,6 +138,8 @@ DISPLAY_NAMES = {
         "PROPOSED SOFT VOGEO",
     "conv":
         "EnCodec 2.25 kbps + Conv(3/4) SOFT Viterbi",
+    "ldpc":
+        "EnCodec 2.25 kbps + LDPC(3/4) SOFT normalized min-sum",
     "plain":
         "EnCodec 3 kbps uncoded (hard BPSK decisions)",
 }
@@ -132,6 +148,7 @@ DISPLAY_NAMES = {
 CSV_METHOD_NAMES = {
     "vogeo": "proposed",
     "conv": "conv",
+    "ldpc": "ldpc",
     "plain": "3",
 }
 
@@ -191,14 +208,117 @@ def _bundle_decision_mode(bundle_dir):
     return None, None
 
 
-BUNDLE_NAME = "bundle_3_out_4"
-VOGEO_BUNDLE_DIR = os.path.join(SOFT_REF_DIR, BUNDLE_NAME)
+def _read_manifest(bundle_dir):
+    manifest_path = os.path.join(bundle_dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
 
-if not os.path.isdir(VOGEO_BUNDLE_DIR):
-    raise RuntimeError(
-        f"New 30+10 VOGEO bundle not found: {VOGEO_BUNDLE_DIR}\n"
-        "Place the trained soft bundle there or change BUNDLE_NAME."
-    )
+
+def _find_30plus10_soft_bundle():
+    """Find the same compatible 3-codebook + 10-parity SOFT VOGEO bundle as TX."""
+    preferred_roots = [
+        os.path.join(SOFT_REF_DIR, "bundle_3_4"),
+        os.path.join(SOFT_REF_DIR, "bundle_3_out_4"),
+        os.path.join(SOFT_REF_DIR, "bundle_30_10"),
+    ]
+
+    candidates = []
+    seen = set()
+
+    def add_manifest_dir(path):
+        path = os.path.abspath(path)
+        if path in seen:
+            return
+        seen.add(path)
+
+        manifest = _read_manifest(path)
+        if manifest is None:
+            return
+
+        mode = manifest.get("decision_mode")
+        if mode is not None and str(mode).lower() != "soft":
+            return
+
+        def as_int(*names):
+            for name in names:
+                if name in manifest:
+                    try:
+                        return int(manifest[name])
+                    except Exception:
+                        pass
+            return None
+
+        def as_float(*names):
+            for name in names:
+                if name in manifest:
+                    try:
+                        return float(manifest[name])
+                    except Exception:
+                        pass
+            return None
+
+        n_q = as_int("n_q", "num_codebooks", "num_quantizers")
+        parity = as_int("parity_dim", "parity_bits", "parity_bits_per_frame")
+        bw = as_float("bandwidth", "bandwidth_kbps", "encodec_bandwidth")
+
+        if n_q is not None and n_q != 3:
+            return
+        if parity is not None and parity != 10:
+            return
+
+        score = 0
+        lower = path.lower()
+        if "bundle_3_4" in lower:
+            score += 100
+        if "bundle_3_out_4" in lower:
+            score += 95
+        if "bundle_30_10" in lower:
+            score += 90
+        if n_q == 3:
+            score += 20
+        if parity == 10:
+            score += 20
+        if bw is not None and abs(bw - 2.25) < 1e-3:
+            score += 10
+        if mode is not None and str(mode).lower() == "soft":
+            score += 10
+
+        candidates.append((score, path))
+
+    for root in preferred_roots:
+        if not os.path.isdir(root):
+            continue
+        if os.path.isfile(os.path.join(root, "manifest.json")):
+            add_manifest_dir(root)
+        for walk_root, _dirs, files in os.walk(root):
+            if "manifest.json" in files:
+                add_manifest_dir(walk_root)
+
+    if not candidates and os.path.isdir(SOFT_REF_DIR):
+        for walk_root, _dirs, files in os.walk(SOFT_REF_DIR):
+            if "manifest.json" in files:
+                add_manifest_dir(walk_root)
+
+    if not candidates:
+        raise RuntimeError(
+            "Could not find a compatible 30+10 SOFT VOGEO bundle under:\n"
+            f"  {SOFT_REF_DIR}\n"
+            "Expected a directory containing manifest.json with soft mode, "
+            "3 codebooks, and 10 parity bits."
+        )
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][1]
+
+
+VOGEO_BUNDLE_DIR = _find_30plus10_soft_bundle()
+BUNDLE_NAME = os.path.basename(VOGEO_BUNDLE_DIR)
 
 mode, manifest = _bundle_decision_mode(VOGEO_BUNDLE_DIR)
 if mode is not None and mode != "soft":
@@ -397,7 +517,265 @@ NEXT_STATE, OUT_BITS = (
 
 
 # ============================================================
-# HARD VOGEO
+# RATE-3/4 SYSTEMATIC LDPC DECODER
+#
+# Must exactly match the transmitter construction:
+#   2250 EnCodec source bits + 6 known zero bits = k=2256
+#   n=3008, m=752, exact nominal rate k/n = 3/4.
+#
+# H = [A | B]
+#   A: each information variable has degree 3 and every check gets 9 A edges.
+#   B: dual-diagonal accumulator parity section.
+#
+# Decoding is SOFT normalized min-sum.  GNU Radio's received BPSK metrics
+# are kept as real-valued reliabilities; they are NOT hard-sliced first.
+# ============================================================
+
+LDPC_SOURCE_BITS = CONV_INFO_BITS
+LDPC_ZERO_PAD_BITS = TAIL_BITS
+LDPC_K = LDPC_SOURCE_BITS + LDPC_ZERO_PAD_BITS       # 2256
+LDPC_N = CONV_PHYSICAL_BITS                          # 3008
+LDPC_M = LDPC_N - LDPC_K                             # 752
+LDPC_RATE = LDPC_K / LDPC_N                          # 0.75
+LDPC_INFO_DEGREE = 3
+
+LDPC_MAX_ITERS = 40
+LDPC_MIN_SUM_ALPHA = 0.80
+LDPC_KNOWN_ZERO_LLR = 50.0
+
+if LDPC_K * 4 != LDPC_N * 3:
+    raise RuntimeError(
+        f"LDPC dimensions are not exactly rate 3/4: "
+        f"k={LDPC_K}, n={LDPC_N}"
+    )
+
+
+def _build_ldpc_info_checks():
+    """Exact deterministic information-side graph used by the TX."""
+    j = np.arange(LDPC_K, dtype=np.int64)
+    group = j // LDPC_M
+    r = j % LDPC_M
+
+    c0 = r
+    c1 = (87 * r + 103 + 128 * group) % LDPC_M
+    c2 = (75 * r + 561 + 448 * group) % LDPC_M
+
+    checks = np.stack((c0, c1, c2), axis=1).astype(np.int32)
+
+    if np.any(checks[:, 0] == checks[:, 1]) or \
+       np.any(checks[:, 0] == checks[:, 2]) or \
+       np.any(checks[:, 1] == checks[:, 2]):
+        raise RuntimeError(
+            "LDPC construction produced duplicate checks for an information bit"
+        )
+
+    check_degrees = np.bincount(
+        checks.reshape(-1), minlength=LDPC_M
+    )
+    if not np.all(check_degrees == 9):
+        raise RuntimeError(
+            "LDPC information-side check degrees are not all 9"
+        )
+
+    return checks
+
+
+LDPC_INFO_CHECKS = _build_ldpc_info_checks()
+
+
+def _build_ldpc_graph():
+    """Build edge arrays and per-check edge lists for H=[A|B]."""
+    edge_vars = []
+    edge_checks = []
+
+    # A section: three check edges per systematic information variable.
+    for var in range(LDPC_K):
+        for check in LDPC_INFO_CHECKS[var]:
+            edge_vars.append(var)
+            edge_checks.append(int(check))
+
+    # B section: check i contains p_i and, for i>0, p_{i-1}.
+    for check in range(LDPC_M):
+        edge_vars.append(LDPC_K + check)
+        edge_checks.append(check)
+        if check > 0:
+            edge_vars.append(LDPC_K + check - 1)
+            edge_checks.append(check)
+
+    edge_vars = np.asarray(edge_vars, dtype=np.int32)
+    edge_checks = np.asarray(edge_checks, dtype=np.int32)
+
+    check_edges = [
+        np.flatnonzero(edge_checks == check).astype(np.int32)
+        for check in range(LDPC_M)
+    ]
+
+    return edge_vars, edge_checks, check_edges
+
+
+LDPC_EDGE_VAR, LDPC_EDGE_CHECK, LDPC_CHECK_EDGES = _build_ldpc_graph()
+LDPC_NUM_EDGES = int(LDPC_EDGE_VAR.size)
+LDPC_USEFUL_BITS = LDPC_N
+LDPC_BYTES = math.ceil(LDPC_USEFUL_BITS / 8)
+LDPC_PHYSICAL_BITS = LDPC_BYTES * 8
+
+if LDPC_PHYSICAL_BITS != CONV_PHYSICAL_BITS:
+    raise RuntimeError(
+        f"LDPC physical bits={LDPC_PHYSICAL_BITS}, "
+        f"Conv={CONV_PHYSICAL_BITS}"
+    )
+
+
+def _ldpc_syndrome(bits):
+    """Return H @ bits mod 2 for the exact TX parity-check matrix."""
+    bits = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    if bits.size != LDPC_N:
+        raise ValueError(f"LDPC word={bits.size}, expected {LDPC_N}")
+
+    syndrome = np.zeros(LDPC_M, dtype=np.uint8)
+
+    # A*u
+    for edge in range(LDPC_INFO_DEGREE):
+        np.bitwise_xor.at(
+            syndrome,
+            LDPC_INFO_CHECKS[:, edge],
+            bits[:LDPC_K],
+        )
+
+    # B*p: p_i XOR p_{i-1}, p_{-1}=0
+    parity = bits[LDPC_K:]
+    syndrome ^= parity
+    syndrome[1:] ^= parity[:-1]
+    return syndrome
+
+
+def ldpc_decode_soft(soft_physical):
+    """
+    Soft normalized-min-sum LDPC decoder.
+
+    Input convention from this flowgraph:
+        negative metric -> bit 0
+        positive metric -> bit 1
+
+    Internally we use the conventional LLR sign:
+        positive -> bit 0
+        negative -> bit 1
+
+    Therefore channel_llr = -soft_metric.  The decoder never hard-slices
+    the channel observations before iterative decoding.
+    """
+    soft = np.asarray(soft_physical, dtype=np.float32).reshape(-1)
+
+    if soft.size != LDPC_PHYSICAL_BITS:
+        raise ValueError(
+            f"LDPC physical={soft.size}, expected {LDPC_PHYSICAL_BITS}"
+        )
+    if not np.all(np.isfinite(soft)):
+        raise ValueError("NaN/Inf in LDPC soft metrics")
+
+    # Positive conventional LLR means bit 0.  Absolute scale is not critical
+    # for normalized min-sum; relative magnitude preserves reliability.
+    channel_llr = -soft.astype(np.float64, copy=True)
+
+    # Six padding bits are known zeros at both TX and RX, analogous to the
+    # known termination used by the convolutional baseline.
+    pad_start = LDPC_SOURCE_BITS
+    pad_end = LDPC_K
+    channel_llr[pad_start:pad_end] = np.maximum(
+        channel_llr[pad_start:pad_end],
+        LDPC_KNOWN_ZERO_LLR,
+    )
+
+    v2c = channel_llr[LDPC_EDGE_VAR].copy()
+    c2v = np.zeros(LDPC_NUM_EDGES, dtype=np.float64)
+    posterior = channel_llr.copy()
+
+    used_iters = 0
+    syndrome_weight = LDPC_M
+
+    for iteration in range(1, LDPC_MAX_ITERS + 1):
+        # Check-node update.
+        for edges in LDPC_CHECK_EDGES:
+            vals = v2c[edges]
+            absvals = np.abs(vals)
+
+            min_pos = int(np.argmin(absvals))
+            min1 = float(absvals[min_pos])
+            if edges.size > 1:
+                tmp = absvals.copy()
+                tmp[min_pos] = np.inf
+                min2 = float(tmp.min())
+            else:
+                min2 = min1
+
+            signs = np.where(vals >= 0.0, 1.0, -1.0)
+            total_sign = float(np.prod(signs))
+
+            mags = np.full(edges.size, min1, dtype=np.float64)
+            mags[min_pos] = min2
+
+            # Excluding edge i: product of all signs / sign_i.
+            out_sign = total_sign * signs
+            c2v[edges] = (
+                LDPC_MIN_SUM_ALPHA
+                * out_sign
+                * mags
+            )
+
+        # Variable-node posterior.
+        posterior = channel_llr.copy()
+        np.add.at(posterior, LDPC_EDGE_VAR, c2v)
+
+        hard = (posterior < 0.0).astype(np.uint8)
+        syndrome = _ldpc_syndrome(hard)
+        syndrome_weight = int(syndrome.sum())
+        used_iters = iteration
+
+        if syndrome_weight == 0:
+            break
+
+        # Extrinsic variable-to-check update.
+        v2c = posterior[LDPC_EDGE_VAR] - c2v
+
+    decoded_word = (posterior < 0.0).astype(np.uint8)
+    source_bits = decoded_word[:LDPC_SOURCE_BITS]
+
+    return source_bits, {
+        "iterations": used_iters,
+        "syndrome_weight": syndrome_weight,
+        "converged": syndrome_weight == 0,
+    }
+
+
+def decode_ldpc_soft(soft_physical, valid_samples):
+    source_bits, stats = ldpc_decode_soft(soft_physical)
+
+    bits = source_bits.reshape(
+        FRAMES_PER_CHUNK,
+        PROTECTED_N_Q,
+        BITS_PER_CODE,
+    )
+
+    weights = (
+        1 << np.arange(
+            BITS_PER_CODE - 1, -1, -1, dtype=np.uint16
+        )
+    )
+
+    codes = (
+        bits.astype(np.uint16)
+        * weights[None, None, :]
+    ).sum(axis=2, dtype=np.uint16).T
+
+    audio = decode_encodec_codes(
+        codes, valid_samples, PROTECTED_N_Q
+    )
+
+    return audio, stats
+
+
+# ============================================================
+# SOFT VOGEO
 # ============================================================
 
 VOGEO_BITS_PER_FRAME = (
@@ -430,9 +808,10 @@ VOGEO_PAD_BITS = (
 # ============================================================
 
 ORDERS = (
-    ("plain", "conv", "vogeo"),
-    ("conv", "vogeo", "plain"),
-    ("vogeo", "plain", "conv"),
+    ("plain", "conv", "ldpc", "vogeo"),
+    ("conv", "ldpc", "vogeo", "plain"),
+    ("ldpc", "vogeo", "plain", "conv"),
+    ("vogeo", "plain", "conv", "ldpc"),
 )
 
 SEGMENT_PHYSICAL_BITS = {
@@ -440,6 +819,8 @@ SEGMENT_PHYSICAL_BITS = {
         PLAIN_PHYSICAL_BITS,
     "conv":
         CONV_PHYSICAL_BITS,
+    "ldpc":
+        LDPC_PHYSICAL_BITS,
     "vogeo":
         VOGEO_PHYSICAL_BITS,
 }
@@ -447,12 +828,13 @@ SEGMENT_PHYSICAL_BITS = {
 SUPER_PACKET_BYTES = (
     PLAIN_BYTES
     + CONV_BYTES
+    + LDPC_BYTES
     + VOGEO_BYTES
-)                                                   # 1127
+)                                                   # 1502
 
 SUPER_PACKET_BITS = (
     SUPER_PACKET_BYTES * 8
-)                                                   # 9016
+)                                                   # 12016
 
 # GNU Radio can KEEP sending one float32 soft metric/bit.
 # Soft metrics are preserved for Conv and VOGEO; Plain uses a sign decision.
@@ -463,7 +845,13 @@ SOFT_DTYPE = np.dtype(
 SOFT_SUPER_PACKET_BYTES = (
     SUPER_PACKET_BITS
     * SOFT_DTYPE.itemsize
-)                                                   # 36064
+)                                                   # 48064
+
+# GNU Radio sends SPK1 + uint32 detection_id + float32[12016].
+SOFT_PDU_HEADER = struct.Struct("!4sI")
+IQ_FRAGMENT_HEADER = struct.Struct("!4sIHHI")
+RECORDING_SAMPLES = SUPER_PACKET_BITS
+IQ_SAMPLE_BYTES = RECORDING_SAMPLES * np.dtype("<c8").itemsize
 
 
 # ============================================================
@@ -1714,6 +2102,8 @@ def mark_missing_super(
         total_chunks,
     )
 
+    _missing_csv.writerow([audio_id, chunk_id, reason])
+
     print(
         f"MISSING SUPER PACKET | "
         f"audio={audio_id} | "
@@ -1844,6 +2234,36 @@ def process_super_packet(
             f"{exc}"
         )
 
+    # ---------------- LDPC SOFT ----------------
+    try:
+        audio, ldpc_stats = decode_ldpc_soft(
+            parts["ldpc"],
+            valid_samples,
+        )
+
+        state[
+            "chunks"
+        ]["ldpc"][
+            chunk_id
+        ] = audio
+
+        print(
+            f"  LDPC SOFT OK | "
+            f"{LDPC_PHYSICAL_BITS} RX metrics "
+            f"-> normalized min-sum "
+            f"iters={ldpc_stats['iterations']} | "
+            f"syndrome_w={ldpc_stats['syndrome_weight']} | "
+            f"converged={ldpc_stats['converged']} "
+            f"-> {LDPC_SOURCE_BITS} info bits"
+        )
+
+    except Exception as exc:
+        print(
+            f"  LDPC SOFT ERROR | "
+            f"{type(exc).__name__}: "
+            f"{exc}"
+        )
+
     # ---------------- VOGEO SOFT ----------------
     try:
         audio = decode_vogeo_soft(
@@ -1947,16 +2367,17 @@ def print_summary():
 # ============================================================
 
 print("============================================================")
-print("THREE-METHOD TX-GAIN SOFT SUPER-PACKET RX | 30+10 + CONV 3/4")
+print("FOUR-METHOD TX-GAIN SOFT SUPER-PACKET RX | 30+10 + CONV 3/4 + LDPC 3/4")
 print("============================================================")
 print("Soft VOGEO folder       =", SOFT_REF_DIR)
 print("Soft VOGEO run ID       =", vogeo.run_id)
 print("Header packet type      =", TYPE_SUPER_SOFT)
 print("USRP TX gain             =", TX_GAIN_DB, "dB")
 print()
-print("CSV method labels       = proposed, conv, 3")
+print("CSV method labels       = proposed, conv, ldpc, 3")
 print("Plain 3 kbps            = hard BPSK slice, 3000 bits")
 print("Conv 2.25 + rate-3/4    = punctured SOFT Viterbi, 3008 physical bits")
+print("LDPC 2.25 + rate-3/4    = SOFT normalized min-sum, 3008 physical bits")
 print("Proposed                = SOFT VOGEO blind two-Gaussian EM LLR decoder, 3000 bits")
 print()
 print("SUPER packet            =", SUPER_PACKET_BYTES, "B /", SUPER_PACKET_BITS, "bits")
@@ -1965,7 +2386,175 @@ print("PESQ CSV                =", PESQ_CSV)
 print("ESTOI CSV               =", ESTOI_CSV)
 print("Received audio folder   =", SAVE_DIR)
 print("VOGEO EM LLR clip        =", VOGEO_LLR_CLIP)
+print("Offline LLR capture      = full-packet two-Gaussian EM, float32; positive=bit1")
 print("============================================================")
+
+
+# ============================================================
+# DETECTED-PACKET CAPTURE (INDEPENDENT OF THE AUDIO DECODERS)
+# ============================================================
+
+CAPTURE_ROOT = (Path(PROJECT_DIR) / "ota_captures" /
+                f"audio_gain_{TX_GAIN_DB:g}" /
+                f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}")
+CAPTURE_ROOT.mkdir(parents=True, exist_ok=False)
+CAPTURE_CSV = CAPTURE_ROOT / "rx_detected_packets.csv"
+CAPTURE_MISSING_CSV = CAPTURE_ROOT / "rx_missing_headers.csv"
+_capture_file = open(CAPTURE_CSV, "w", newline="", buffering=1, encoding="utf-8")
+_capture_csv = csv.writer(_capture_file)
+print(f"IQ + soft metrics + estimated LLR directory: {CAPTURE_ROOT}")
+_capture_csv.writerow([
+    "det_id", "audio_id", "chunk_id_zero_based", "total_chunks",
+    "iq_bin", "soft_bin", "llr_bin", "samples", "rx_unix_ns",
+    "association", "llr_status", "llr_estimator", "llr_clip",
+    "llr_sign_convention", "llr_median_abs",
+])
+_missing_file = open(CAPTURE_MISSING_CSV, "w", newline="", buffering=1, encoding="utf-8")
+_missing_csv = csv.writer(_missing_file)
+_missing_csv.writerow(["audio_id", "chunk_id_zero_based", "reason"])
+
+# IQ packets may arrive before or after the UDP soft packet.
+# The RX computes estimated LLRs from the original soft metrics; the GNU Radio
+# flowgraph and TX protocol do NOT need extra message ports or sockets.
+# Both streams carry the same *detector-assigned* counter, so they can be
+# matched even if the two sockets are scheduled in different orders.
+_captures = {}        # det_id -> {fragments,total,samples,when}
+_soft_captures = {}   # det_id -> {soft,header,when}
+CAPTURE_EXPIRY_SEC = 20.0
+
+
+def _capture_complete(det_id):
+    iq_entry = _captures.get(det_id)
+    soft_entry = _soft_captures.get(det_id)
+    if iq_entry is None or soft_entry is None:
+        return
+    if len(iq_entry["fragments"]) != iq_entry["total"]:
+        return
+
+    iq_bytes = b"".join(iq_entry["fragments"][j]
+                        for j in range(iq_entry["total"]))
+    if iq_entry["samples"] != RECORDING_SAMPLES or len(iq_bytes) != IQ_SAMPLE_BYTES:
+        print(f"IQ LENGTH ERROR | detection={det_id} | bytes={len(iq_bytes)}")
+        _captures.pop(det_id, None)
+        _soft_captures.pop(det_id, None)
+        return
+
+    hdr = soft_entry["header"]
+    if hdr is None:
+        folder = CAPTURE_ROOT / "unmatched"
+        basename = f"detection_{det_id:06d}"
+        association = "UNMATCHED_NO_TX_HEADER"
+    else:
+        audio_id = hdr["audio_id"]
+        chunk_id = hdr["chunk_id"]
+        folder = CAPTURE_ROOT / f"voice_{audio_id:03d}"
+        basename = f"packet_{chunk_id + 1:04d}"
+        association = "TENTATIVE_TX_SOCKET_HEADER"
+
+    folder.mkdir(parents=True, exist_ok=True)
+    iq_path = folder / f"{basename}.bin"
+    soft_path = folder / f"{basename}_soft.bin"
+    llr_path = folder / f"{basename}_llr.bin"
+    # Never overwrite old captures, especially if TX metadata was mispaired.
+    if any(p.exists() for p in (iq_path, soft_path, llr_path)):
+        basename += f"_det_{det_id:06d}"
+        iq_path = folder / f"{basename}.bin"
+        soft_path = folder / f"{basename}_soft.bin"
+        llr_path = folder / f"{basename}_llr.bin"
+
+    # The soft buffer is the ORIGINAL signed DBPSK float32 metric, not an LLR.
+    # Preserve it exactly and estimate a separate, explicit LLR array.
+    raw_soft = np.frombuffer(soft_entry["soft"], dtype=SOFT_DTYPE)
+    llr_array = None
+    llr_stats = None
+    llr_status = "OK"
+    try:
+        if raw_soft.size != RECORDING_SAMPLES:
+            raise ValueError(f"Soft samples={raw_soft.size}, expected {RECORDING_SAMPLES}")
+        llr_array, llr_stats = estimate_vogeo_llr_from_hardware(raw_soft)
+        if llr_array.size != RECORDING_SAMPLES or not np.all(np.isfinite(llr_array)):
+            raise ValueError("LLR length or values invalid")
+    except Exception as exc:
+        # Preserve original IQ and soft metrics even if estimation fails.
+        llr_status = f"ERROR:{type(exc).__name__}:{exc}"
+        print(f"LLR ESTIMATION FAILED | det={det_id} | {llr_status}")
+
+    with open(iq_path, "wb") as f:
+        f.write(iq_bytes)
+    with open(soft_path, "wb") as f:
+        f.write(soft_entry["soft"])
+    if llr_array is not None:
+        # LLR = ln(P(metric|bit=1) / P(metric|bit=0)), little-endian float32.
+        with open(llr_path, "wb") as f:
+            np.asarray(llr_array, dtype="<f4").tofile(f)
+
+    _capture_csv.writerow([
+        det_id,
+        "" if hdr is None else hdr["audio_id"],
+        "" if hdr is None else hdr["chunk_id"],
+        "" if hdr is None else hdr["total_chunks"],
+        str(iq_path.relative_to(CAPTURE_ROOT)),
+        str(soft_path.relative_to(CAPTURE_ROOT)),
+        str(llr_path.relative_to(CAPTURE_ROOT)) if llr_array is not None else "",
+        RECORDING_SAMPLES,
+        soft_entry["when"],
+        association,
+        llr_status,
+        "two_gaussian_EM_equal_variance_full_packet",
+        VOGEO_LLR_CLIP,
+        "positive=bit1;negative=bit0",
+        "" if llr_stats is None else llr_stats["median_abs_llr"],
+    ])
+    print(f"IQ+SOFT RECORDED | det={det_id} | {iq_path} "
+          f"| complex64={RECORDING_SAMPLES} (post-Costas, not raw ADC IQ)")
+    if llr_array is not None:
+        print(f"LLR RECORDED | det={det_id} | {llr_path} "
+              f"| float32={RECORDING_SAMPLES} | two-Gaussian EM estimated")
+    _captures.pop(det_id, None)
+    _soft_captures.pop(det_id, None)
+
+
+def _receive_iq_fragment(raw):
+    if len(raw) < IQ_FRAGMENT_HEADER.size:
+        return
+    magic, det_id, idx, total, nsamples = IQ_FRAGMENT_HEADER.unpack_from(raw)
+    if magic != b"IQF1" or total < 1 or total > 32 or idx >= total:
+        print("DROP MALFORMED IQ FRAGMENT")
+        return
+    if nsamples != RECORDING_SAMPLES:
+        print(f"DROP IQ SAMPLE COUNT | detection={det_id} | {nsamples}")
+        return
+    entry = _captures.setdefault(det_id, {
+        "fragments": {}, "total": total,
+        "samples": nsamples, "when": time.monotonic(),
+    })
+    if entry["total"] != total or entry["samples"] != nsamples:
+        print(f"DROP INCONSISTENT IQ FRAGMENTS | detection={det_id}")
+        return
+    entry["fragments"][idx] = raw[IQ_FRAGMENT_HEADER.size:]
+    _capture_complete(det_id)
+
+
+def _receive_soft_capture(det_id, soft_data, header):
+    _soft_captures[det_id] = {
+        "soft": soft_data, "header": dict(header) if header is not None else None,
+        "when": time.time_ns(), "mono": time.monotonic(),
+    }
+    _capture_complete(det_id)
+
+
+def _expire_partial_capture():
+    now = time.monotonic()
+    for det_id, entry in list(_captures.items()):
+        if now - entry["when"] > CAPTURE_EXPIRY_SEC:
+            print(f"INCOMPLETE IQ (NO BIN) | det={det_id} | "
+                  f"fragments={len(entry['fragments'])}/{entry['total']}")
+            _captures.pop(det_id, None)
+            _soft_captures.pop(det_id, None)
+    for det_id, entry in list(_soft_captures.items()):
+        if now - entry["mono"] > CAPTURE_EXPIRY_SEC:
+            print(f"MISSING IQ FRAGMENTS (NO BIN) | det={det_id}")
+            _soft_captures.pop(det_id, None)
 
 
 # ============================================================
@@ -1974,148 +2563,79 @@ print("============================================================")
 
 try:
     while True:
-        try:
-            raw, _ = sock.recvfrom(
-                65535
-            )
-
-        except socket.timeout:
+        ready, _, _ = select.select([sock, iq_sock], [], [], 0.25)
+        if not ready:
+            _expire_partial_capture()
             continue
-
-        # ---------------- DIRECT HEADER ----------------
-        if (
-            len(raw)
-            == HEADER_SIZE
-        ):
-            (
-                header,
-                error,
-            ) = parse_header(
-                raw
-            )
-
-            if (
-                error
-                is not None
-            ):
-                print(
-                    "DROP HEADER |",
-                    error,
-                )
-                continue
-
-            if (
-                pending_header
-                is not None
-            ):
-                mark_missing_super(
-                    pending_header,
-                    (
-                        "next direct header "
-                        "arrived before RF payload"
-                    ),
-                )
-
-            pending_header = (
-                header
-            )
-
-            print(
-                f"HEADER | "
-                f"audio="
-                f"{header['audio_id']} | "
-                f"chunk="
-                f"{header['chunk_id'] + 1}/"
-                f"{header['total_chunks']} | "
-                f"valid_samples="
-                f"{header['valid_samples']}"
-            )
-
-            continue
-
-        # ---------------- SUPER SOFT PDU -> HARD HERE ----------------
-        if (
-            len(raw)
-            == SOFT_SUPER_PACKET_BYTES
-        ):
-            if (
-                pending_header
-                is None
-            ):
-                print(
-                    f"ORPHAN SUPER PACKET | "
-                    f"{len(raw)} B | "
-                    f"no pending header"
-                )
-                continue
-
-            header = (
-                pending_header
-            )
-
-            pending_header = None
-
+        for ready_sock in ready:
             try:
-                process_super_packet(
-                    header,
-                    bytes(raw),
-                )
+                raw, _ = ready_sock.recvfrom(65535)
+            except (socket.timeout, BlockingIOError):
+                continue
 
-            except Exception as exc:
-                print(
-                    f"SUPER PACKET ERROR | "
-                    f"{type(exc).__name__}: "
-                    f"{exc}"
-                )
+            if ready_sock is iq_sock:
+                _receive_iq_fragment(raw)
+                continue
 
-                mark_missing_super(
-                    header,
-                    (
-                        "hard super-packet "
-                        "processing failed"
-                    ),
-                )
+            # ---------------- DIRECT TX METADATA HEADER ----------------
+            if len(raw) == HEADER_SIZE:
+                header, error = parse_header(raw)
+                if error is not None:
+                    print("DROP HEADER |", error)
+                    continue
+                if pending_header is not None:
+                    mark_missing_super(
+                        pending_header, "next direct header arrived before RF payload"
+                    )
+                pending_header = header
+                print(f"HEADER | audio={header['audio_id']} | "
+                      f"chunk={header['chunk_id'] + 1}/{header['total_chunks']} | "
+                      f"valid_samples={header['valid_samples']}")
+                continue
 
-            continue
+            # ---------------- DETECTED SOFT SUPER-PACKET ----------------
+            if (len(raw) == SOFT_PDU_HEADER.size + SOFT_SUPER_PACKET_BYTES
+                    and raw[:4] == b"SPK1"):
+                _, det_id = SOFT_PDU_HEADER.unpack_from(raw)
+                payload = raw[SOFT_PDU_HEADER.size:]
+                header = pending_header
+                pending_header = None
 
-        print(
-            f"DROP | UDP="
-            f"{len(raw)} B | "
-            f"expected "
-            f"{HEADER_SIZE} B header "
-            f"or "
-            f"{SOFT_SUPER_PACKET_BYTES} B "
-            f"super-packet"
-        )
+                # Save by detection ID, paired with IQF1 frames from UDP 5003.
+                _receive_soft_capture(det_id, bytes(payload), header)
+                if header is None:
+                    print(f"ORPHAN SOFT PACKET | detection={det_id} "
+                          "| IQ will be preserved as unmatched")
+                    continue
+
+                try:
+                    process_super_packet(header, bytes(payload))
+                except Exception as exc:
+                    print(f"SUPER PACKET ERROR | {type(exc).__name__}: {exc}")
+                    mark_missing_super(header, "soft super-packet processing failed")
+                continue
+
+            print(f"DROP | UDP bytes={len(raw)} | expected TX header "
+                  f"({HEADER_SIZE}) or SPK1 soft packet "
+                  f"({SOFT_PDU_HEADER.size + SOFT_SUPER_PACKET_BYTES})")
+
+        _expire_partial_capture()
 
 except KeyboardInterrupt:
-    print(
-        "\nRX stopped"
-    )
-
-    if (
-        pending_header
-        is not None
-    ):
-        mark_missing_super(
-            pending_header,
-            (
-                "RX stopped before "
-                "RF payload"
-            ),
-        )
-
+    print("\nRX stopped")
+    if pending_header is not None:
+        mark_missing_super(pending_header, "RX stopped before RF payload")
         pending_header = None
-
-    for audio_id in list(
-        states.keys()
-    ):
-        finalize_audio(
-            audio_id,
-            "RX stopped",
-        )
-
+    for audio_id in list(states.keys()):
+        finalize_audio(audio_id, "RX stopped")
     print_summary()
 
 finally:
+    # Partial fragments are deliberately NOT written as valid IQ files.
+    for det_id, entry in list(_captures.items()):
+        print(f"UNFINISHED IQ | detection={det_id} | "
+              f"{len(entry['fragments'])}/{entry['total']} fragments")
     sock.close()
+    iq_sock.close()
+    _capture_file.close()
+    _missing_file.close()

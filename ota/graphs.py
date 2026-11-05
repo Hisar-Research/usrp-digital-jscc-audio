@@ -4,10 +4,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.stats import t
+from matplotlib.ticker import MaxNLocator
 
-PESQ_CSV  = "pesq_results_superpacket_soft_txgain.csv"
-ESTOI_CSV = "estoi_results_superpacket_soft_txgain.csv"
-SISDR_CSV = "sisdr_results_superpacket_soft_txgain.csv"
+PESQ_CSV  = "measurement_30 oct/pesq_results_superpacket_soft_txgain.csv"
+ESTOI_CSV = "measurement_30 oct/estoi_results_superpacket_soft_txgain.csv"
+SISDR_CSV = "measurement_30 oct/sisdr_results_superpacket_soft_txgain.csv"
 
 ROLE_STYLES = {
     "M1": {
@@ -57,7 +58,8 @@ CEILING_STYLES = [
 METHOD_TO_ROLE = {
     "proposed": "M1",
     "3": "M2",
-    "conv": "M3.1"
+    "conv": "M3.1",
+    "ldpc": "M3.2",
 }
 
 # Same physical canvas as reference EPS
@@ -80,7 +82,7 @@ plt.rcParams.update({
     "axes.labelsize": 8.5,
     "xtick.labelsize": 7.5,
     "ytick.labelsize": 7.5,
-    "legend.fontsize": 6.2,
+    "legend.fontsize": 5.0,
 
     "axes.linewidth": 0.65,
 
@@ -105,7 +107,7 @@ def read_estoi_repaired(path):
                 continue
 
             found = re.findall(
-                r"(proposed|conv|3),(\d+),([-+0-9.eE]+),([-+0-9.eE]+)",
+                r"(proposed|conv|ldpc|3),(\d+),([-+0-9.eE]+),([-+0-9.eE]+)",
                 s,
             )
 
@@ -134,11 +136,19 @@ def read_estoi_repaired(path):
 
 def summary_95ci(df, metric):
 
-    # tx_gain_db=100 is only a sentinel
-    # for the maximum-gain ceiling experiment
-    d = df[
-        df["tx_gain_db"] < 100
-    ].copy()
+    # Keep the 89-dB reference measurement out of the regular TX-gain curves.
+    # It is used only to draw horizontal ceiling lines.
+    # 89 is the real reference gain; 100 was the old sentinel label.
+    # Neither is a regular data point on the gain axis.
+    d = df[~df["tx_gain_db"].isin([89, 100])].copy()
+
+    # Metrics may contain NaN or infinities if a decoded waveform was invalid.
+    # Do not turn invalid numbers into misleading plot points.
+    d[metric] = pd.to_numeric(d[metric], errors="coerce")
+    bad = ~np.isfinite(d[metric].to_numpy(dtype=float))
+    if bad.any():
+        print(f"Warning: {metric}: skipping {int(bad.sum())} non-finite measurements.")
+        d = d.loc[~bad]
 
     g = (
         d.groupby(
@@ -167,19 +177,32 @@ def summary_95ci(df, metric):
 
 
 def sentinel_ceilings(df, metric):
+    """Return available reference ceilings, without inventing absent data.
 
-    c = (
-        df[
-            df["tx_gain_db"] == 100
-        ]
-        .groupby("method")[metric]
-        .mean()
-    )
+    Gain=89 is the separate reference experiment.
+    Its measurements are used for horizontal ceilings, not TX-gain points.
+    """
+    sentinel = df.loc[df["tx_gain_db"] == 89].copy()
+    sentinel[metric] = pd.to_numeric(sentinel[metric], errors="coerce")
+    sentinel = sentinel.loc[np.isfinite(sentinel[metric].to_numpy(dtype=float))]
+    c = sentinel.groupby("method")[metric].mean()
 
-    return {
-        "coded": float(c["proposed"]),
-        "uncoded": float(c["3"]),
-    }
+    ceilings = {}
+    for key, method in (("coded", "proposed"), ("uncoded", "3")):
+        value = c.get(method, np.nan)
+        if pd.notna(value) and np.isfinite(value):
+            ceilings[key] = float(value)
+        else:
+            print(
+                f"Warning: {metric}: no gain=89 reference measurement "
+                f"for method {method!r}; skipping that ceiling."
+            )
+
+    if sentinel.empty:
+        print(f"  Available gains in {metric}: {sorted(df['tx_gain_db'].dropna().unique())}")
+    else:
+        print(f"  Methods recorded at gain=89 for {metric}: {list(c.index)}")
+    return ceilings
 
 
 def make_plot(
@@ -210,7 +233,8 @@ def make_plot(
     for method in [
         "proposed",
         "3",
-        "conv"
+        "conv",
+        "ldpc"
     ]:
 
         st = ROLE_STYLES[
@@ -223,6 +247,10 @@ def make_plot(
             ]
             .sort_values("tx_gain_db")
         )
+
+        if s.empty:
+            print(f"Warning: {metric}: no data for method {method!r}; omitting curve.")
+            continue
 
         ax.errorbar(
             s["tx_gain_db"],
@@ -263,40 +291,31 @@ def make_plot(
     # Error-free / maximum-gain ceilings
     # --------------------------------------------------
 
-    ax.axhline(
-        ceilings["coded"],
-        color=CEILING_STYLES[0][0],
-        linestyle=CEILING_STYLES[0][1],
-        linewidth=0.9,
-        zorder=2,
-    )
+    ceiling_handles = []
+    for key, idx, label in (
+        ("coded", 0, "Ceiling @ 89 dB, M1/M3.1/M3.2"),
+        ("uncoded", 1, "Ceiling @ 89 dB, M2"),
+    ):
+        if key not in ceilings:
+            continue
 
-    ax.axhline(
-        ceilings["uncoded"],
-        color=CEILING_STYLES[1][0],
-        linestyle=CEILING_STYLES[1][1],
-        linewidth=0.9,
-        zorder=2,
-    )
-
-    ceiling_handles = [
-
-        Line2D(
-            [0], [0],
-            color=CEILING_STYLES[0][0],
-            linestyle=CEILING_STYLES[0][1],
+        color, linestyle = CEILING_STYLES[idx]
+        ax.axhline(
+            ceilings[key],
+            color=color,
+            linestyle=linestyle,
             linewidth=0.9,
-            label="Ceiling @ 89 dB, M1/M3.1",
-        ),
-
-        Line2D(
-            [0], [0],
-            color=CEILING_STYLES[1][0],
-            linestyle=CEILING_STYLES[1][1],
-            linewidth=0.9,
-            label="Ceiling @ 89 dB, M2",
-        ),
-    ]
+            zorder=2,
+        )
+        ceiling_handles.append(
+            Line2D(
+                [0], [0],
+                color=color,
+                linestyle=linestyle,
+                linewidth=0.9,
+                label=label,
+            )
+        )
 
     # --------------------------------------------------
     # Axes
@@ -313,6 +332,8 @@ def make_plot(
     xs = sorted(
         g["tx_gain_db"].unique()
     )
+    if not len(xs):
+        raise ValueError(f"No regular TX-gain data found for {metric}; check the CSV.")
 
     ax.set_xticks(xs)
 
@@ -321,9 +342,23 @@ def make_plot(
         max(xs) + 0.5
     )
 
-    ax.set_ylim(
-        *ylim
-    )
+    if ylim is None:
+        # Fit the y-axis to the visible means, confidence intervals and
+        # the 89-dB reference ceilings. No hard-coded [-50, 4.5] clipping.
+        lows = (g["mean"] - g["ci95"]).to_numpy(dtype=float)
+        highs = (g["mean"] + g["ci95"]).to_numpy(dtype=float)
+        limits = np.concatenate([
+            lows, highs,
+            np.asarray(list(ceilings.values()), dtype=float)
+        ])
+        limits = limits[np.isfinite(limits)]
+        if limits.size:
+            lo, hi = float(limits.min()), float(limits.max())
+            pad = max(1.0, 0.07 * (hi - lo))
+            ax.set_ylim(lo - pad, hi + pad)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=7))
+    else:
+        ax.set_ylim(*ylim)
 
     # --------------------------------------------------
     # Grid
@@ -354,13 +389,13 @@ def make_plot(
         fancybox=False,
         framealpha=1.0,
 
-        borderpad=0.32,
-        labelspacing=0.20,
+        borderpad=0.18,
+        labelspacing=0.12,
 
-        handlelength=2.25,
-        handletextpad=0.42,
+        handlelength=1.65,
+        handletextpad=0.32,
 
-        borderaxespad=0.42,
+        borderaxespad=0.32,
     )
 
     leg.get_frame().set_linewidth(
@@ -419,10 +454,26 @@ sisdr = pd.read_csv(
     SISDR_CSV
 )
 
+for dataset in (pesq, estoi, sisdr):
+    dataset.columns = dataset.columns.str.strip()
+    dataset["method"] = dataset["method"].astype(str).str.strip().str.lower()
+    dataset["tx_gain_db"] = pd.to_numeric(dataset["tx_gain_db"], errors="coerce")
+
+# Data diagnostics: the plotting code cannot repair incorrectly aligned audio.
+print("Methods in SI-SDR CSV:", sorted(sisdr["method"].unique()))
+print("TX gains in SI-SDR CSV:", sorted(sisdr["tx_gain_db"].dropna().unique()))
+regular_sisdr = pd.to_numeric(
+    sisdr.loc[sisdr["tx_gain_db"] != 89, "si_sdr_db"], errors="coerce"
+)
+if (regular_sisdr < -60).any():
+    print("Note: SI-SDR contains values below -60 dB. "
+          "Verify audio alignment and the SI-SDR calculation; "
+          "a plot cannot fix incorrect metric values.")
+
 
 # ======================================================
 # PESQ
-# Legend moved to UPPER LEFT
+# Compact legend in the upper left, matching the three-panel figure
 # ======================================================
 
 make_plot(
@@ -437,7 +488,7 @@ make_plot(
 
     ceilings=PESQ_CEILINGS,
 
-    legend_loc="center left",
+    legend_loc="upper left",
 )
 
 
@@ -467,7 +518,7 @@ make_plot(
 
 # ======================================================
 # SI-SDR
-# Keep legend lower right
+# Compact legend lower right
 # ======================================================
 
 make_plot(
@@ -478,7 +529,7 @@ make_plot(
 
     output_name="sisdr_vs_tx_gain_95ci_ceiling",
 
-    ylim=(-50, 4.5),
+    ylim=None,  # SI-SDR can extend below -50 dB; fit real values instead.
 
     ceilings=sentinel_ceilings(
         sisdr,

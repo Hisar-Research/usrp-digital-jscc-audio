@@ -99,7 +99,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [784, 196.0]
+    coordinate: [752, 216.0]
     rotation: 0
     state: enabled
 - name: rx_gain
@@ -452,18 +452,19 @@ blocks:
   id: epy_block
   parameters:
     _source_code: "import numpy as np\nfrom gnuradio import gr\nimport pmt\nimport\
-      \ array\n\nclass blk(gr.basic_block):\n    \"\"\"\n    4096-bit low-SNR packet\
-      \ detector with soft-assisted acquisition.\n\n    Input 0: differentially decoded\
-      \ hard bits (uint8)\n    Input 1: aligned DBPSK soft metric (float32), negative=0,\
-      \ positive=1\n\n    Detection policy:\n      1) hard accept when Hamming distance\
-      \ <= 1840/4096\n      2) for 1841..1900 errors, accept only when normalized\
+      \ array\nimport struct\n\nclass blk(gr.basic_block):\n    \"\"\"\n    4096-bit\
+      \ low-SNR packet detector with soft-assisted acquisition.\n\n    Input 0: differentially\
+      \ decoded hard bits (uint8)\n    Input 1: aligned DBPSK soft metric (float32),\
+      \ negative=0, positive=1\n    Input 2: same-symbol, post-Costas complex64 samples\
+      \ (not raw USRP IQ)\n\n    Detection policy:\n      1) hard accept when Hamming\
+      \ distance <= 1840/4096\n      2) for 1841..1900 errors, accept only when normalized\
       \ soft\n         correlation with the known 4096-bit sync word is >= 0.10\n\n\
       \    Packet extraction / UDP payload behavior is unchanged.\n    \"\"\"\n\n\
       \    def __init__(self, skip_header_bits=96, plain_bytes=488,\n            \
       \     soft_bits=3900, vogeo_bytes=488, sync_tag=\"unused\"):\n        gr.basic_block.__init__(\n\
       \            self,\n            name=\"4096-bit hard+soft low-SNR detector\"\
-      ,\n            in_sig=[np.uint8, np.float32],\n            out_sig=[]\n    \
-      \    )\n\n        self.sync_bits = \"0101011101010101001110101111100011001010011011000101100001110000011100000011101101010101010100011100001011001110010010111001001111100101100101010011101001101010011110010110000001001000101000100010001111110110001111100101101010001011111101010001010111101010011001011100111001001111111101001000011111000111101101101110100011010111111111100101010110000110010011001010101101100000011110101110111001111111011000011011110011000101110111111001000111010101100000000111100001101011100110010111000000101101010000011101000010001000010101000110110101010100111100110011011101111101001010111110111101101001100110000010001111000001010111000000101011001101111010000100110100010111101111010000000100011101100010000100111110001011010101101110110111100111001101010000111110000101111000001100111011000011011011010000010011110010110010011110000010000000111101011011111011000010010001011000110111011001011001011100010100000110101001011000101111100111111111001111110110111111101010101001011101010101110101010111110000101111101100010100000000101111100011000010101100111010000010001001110101100110001000101010000001101100001011101010010010001111000101111101001110000100000011100000001011000011110010001001011000100110110111111000111111100001101110100110000101011100111101101011000110100011010100000110011101110100000011001000000001100010101100101011110110110100011000101011001111011111100011001101010111010110111111001110011111111010110011101010010011101101000111000000011001101010111001101110111100101110101010111011000001101110000011000110111111000001000100001101011010000111010100010010011001101001110010101111011110100011010100001000111010110010100010100111000100100010100101001001010110100010011110110001110111100111001001111000101101010011110111111010011100001110000001001000000101000001000000111000101110100111010000010111100011010011001011110101011001100100000100011110110100011101011100001110110111000111010101011111110000111111100100011110110010101000011101100110101000110011010100111110101111110001000011100100101100011011111010100011100001001101001110110000100110100010001100101011110110011110001101001110111111000110110100101000110100111011111000101100101101000100100110110100111010000011111001001010111101011010011011111101100111110101110001010010100110011111001010111100000101001001111100011011011110001101010110111100110110101001001110110001011000011000000001010111011100010000010010000110101110010001010010010000101001101000111110100011110100101111001001110111111110011001010111110010011111001110100011011011101011101010001110111100110010101011011011001111001000100000100110000010101010100011001011000110010000111000101010101011011001000101100110010100010001000010101001010001100001100101110100100111111010000110011000110001001100010101011001010111100011001011011100000000010100000011110011001010000110010110100100000001111010110010111100011011011101010010010000101010000110110001111001011010110010010011100110110011011110101010000110000011000001110011111100010001111110111111011111101101010111010111100111111111010101010100100101000011001110101011011100001011011101111111010110001010000100110100011101101100001111011101000101000000110110000011111111001000011000001000001001010011000100111001101001101110111100000010100000100000011110110010010000010111110111101110110001001111010101110100110011011110000100010111001010111111111111111110101110011010001101011111101010000110111110110100000000100000001110100111101000101001111101010100111011101000101111110110010110101110010010001011111111110100100100101001101100110110111101100000010000100111011001101001110100100000000001110111001000000111100010010001011101110111010101110100000111011001011011010011101011100001100111000100100011010010101110101100111110101111110001111100000000001010010101000110110101110100010010111101110000101010110111001000001000110110011100000111111011010101010111111010001101011110011011101110101000011110110010001101011111010111111010110110011001100100110010011000111011010010111011110000100111111011001101001110110000101000110100010001010111000101111010111001001000010010001110111100011100111010000110110100000010101010111011100011\"\
+      ,\n            in_sig=[np.uint8, np.float32, np.complex64],\n            out_sig=[]\n\
+      \        )\n\n        self.sync_bits = \"0101011101010101001110101111100011001010011011000101100001110000011100000011101101010101010100011100001011001110010010111001001111100101100101010011101001101010011110010110000001001000101000100010001111110110001111100101101010001011111101010001010111101010011001011100111001001111111101001000011111000111101101101110100011010111111111100101010110000110010011001010101101100000011110101110111001111111011000011011110011000101110111111001000111010101100000000111100001101011100110010111000000101101010000011101000010001000010101000110110101010100111100110011011101111101001010111110111101101001100110000010001111000001010111000000101011001101111010000100110100010111101111010000000100011101100010000100111110001011010101101110110111100111001101010000111110000101111000001100111011000011011011010000010011110010110010011110000010000000111101011011111011000010010001011000110111011001011001011100010100000110101001011000101111100111111111001111110110111111101010101001011101010101110101010111110000101111101100010100000000101111100011000010101100111010000010001001110101100110001000101010000001101100001011101010010010001111000101111101001110000100000011100000001011000011110010001001011000100110110111111000111111100001101110100110000101011100111101101011000110100011010100000110011101110100000011001000000001100010101100101011110110110100011000101011001111011111100011001101010111010110111111001110011111111010110011101010010011101101000111000000011001101010111001101110111100101110101010111011000001101110000011000110111111000001000100001101011010000111010100010010011001101001110010101111011110100011010100001000111010110010100010100111000100100010100101001001010110100010011110110001110111100111001001111000101101010011110111111010011100001110000001001000000101000001000000111000101110100111010000010111100011010011001011110101011001100100000100011110110100011101011100001110110111000111010101011111110000111111100100011110110010101000011101100110101000110011010100111110101111110001000011100100101100011011111010100011100001001101001110110000100110100010001100101011110110011110001101001110111111000110110100101000110100111011111000101100101101000100100110110100111010000011111001001010111101011010011011111101100111110101110001010010100110011111001010111100000101001001111100011011011110001101010110111100110110101001001110110001011000011000000001010111011100010000010010000110101110010001010010010000101001101000111110100011110100101111001001110111111110011001010111110010011111001110100011011011101011101010001110111100110010101011011011001111001000100000100110000010101010100011001011000110010000111000101010101011011001000101100110010100010001000010101001010001100001100101110100100111111010000110011000110001001100010101011001010111100011001011011100000000010100000011110011001010000110010110100100000001111010110010111100011011011101010010010000101010000110110001111001011010110010010011100110110011011110101010000110000011000001110011111100010001111110111111011111101101010111010111100111111111010101010100100101000011001110101011011100001011011101111111010110001010000100110100011101101100001111011101000101000000110110000011111111001000011000001000001001010011000100111001101001101110111100000010100000100000011110110010010000010111110111101110110001001111010101110100110011011110000100010111001010111111111111111110101110011010001101011111101010000110111110110100000000100000001110100111101000101001111101010100111011101000101111110110010110101110010010001011111111110100100100101001101100110110111101100000010000100111011001101001110100100000000001110111001000000111100010010001011101110111010101110100000111011001011011010011101011100001100111000100100011010010101110101100111110101111110001111100000000001010010101000110110101110100010010111101110000101010110111001000001000110110011100000111111011010101010111111010001101011110011011101110101000011110110010001101011111010111111010110110011001100100110010011000111011010010111011110000100111111011001101001110110000101000110100010001010111000101111010111001001000010010001110111100011100111010000110110100000010101010111011100011\"\
       \n        self.sync_len = len(self.sync_bits)\n        self.sync_int = int(self.sync_bits,\
       \ 2)\n        self.sync_mask = (1 << self.sync_len) - 1\n\n        # Conservative\
       \ hard detector plus a soft-assisted rescue region.\n        self.hard_threshold\
@@ -475,14 +476,16 @@ blocks:
       \     self.skip_header_bits = int(skip_header_bits)\n        self.fixed_bytes\
       \ = int(plain_bytes)\n        self.target_bits = self.fixed_bytes * 8\n    \
       \    self.soft_target_bits = int(soft_bits)\n\n        self.out_port = pmt.intern(\"\
-      pdus\")\n        self.soft_out_port = pmt.intern(\"soft_pdus\")\n        self.message_port_register_out(self.out_port)\n\
-      \        self.message_port_register_out(self.soft_out_port)\n\n        self.shiftreg\
-      \ = 0\n        self.search_count = 0\n\n        # Circular buffer holding the\
-      \ soft values aligned with the current\n        # 4096-bit hard synchronization\
-      \ window.\n        self.sync_soft_buf = np.zeros(self.sync_len, dtype=np.float32)\n\
-      \        self.sync_soft_write = 0\n\n        self.state = \"SEARCH\"\n     \
-      \   self.skip_left = 0\n\n        self.buf = np.empty(self.target_bits, dtype=np.uint8)\n\
-      \        self.soft_buf = np.empty(self.target_bits, dtype=np.float32)\n    \
+      pdus\")\n        self.soft_out_port = pmt.intern(\"soft_pdus\")\n        self.iq_out_port\
+      \ = pmt.intern(\"iq_pdus\")\n        self.message_port_register_out(self.out_port)\n\
+      \        self.message_port_register_out(self.soft_out_port)\n        self.message_port_register_out(self.iq_out_port)\n\
+      \n        self.shiftreg = 0\n        self.search_count = 0\n\n        # Circular\
+      \ buffer holding the soft values aligned with the current\n        # 4096-bit\
+      \ hard synchronization window.\n        self.sync_soft_buf = np.zeros(self.sync_len,\
+      \ dtype=np.float32)\n        self.sync_soft_write = 0\n\n        self.state\
+      \ = \"SEARCH\"\n        self.skip_left = 0\n\n        self.buf = np.empty(self.target_bits,\
+      \ dtype=np.uint8)\n        self.soft_buf = np.empty(self.target_bits, dtype=np.float32)\n\
+      \        self.iq_buf = np.empty(self.target_bits, dtype=np.complex64)\n    \
       \    self.pos = 0\n        self.detections = 0\n\n    def _reset_search(self):\n\
       \        self.shiftreg = 0\n        self.search_count = 0\n        self.sync_soft_write\
       \ = 0\n        self.sync_soft_buf.fill(0.0)\n        self.state = \"SEARCH\"\
@@ -511,23 +514,39 @@ blocks:
       \        f\"got={len(packed)} expected={self.fixed_bytes}\"\n            )\n\
       \            self._reset_search()\n            return\n\n        vec = pmt.init_u8vector(len(packed),\
       \ packed.tolist())\n        self.message_port_pub(\n            self.out_port,\n\
-      \            pmt.cons(pmt.PMT_NIL, vec)\n        )\n\n        soft_bytes = self.soft_buf[:self.soft_target_bits].astype(\n\
-      \            \"<f4\", copy=False\n        ).tobytes()\n        soft_vec = pmt.init_u8vector(len(soft_bytes),\
-      \ array.array(\"B\", soft_bytes))\n        self.message_port_pub(\n        \
-      \    self.soft_out_port,\n            pmt.cons(pmt.PMT_NIL, soft_vec)\n    \
-      \    )\n\n        print(\n            \"RF PAYLOAD EMITTED | \"\n          \
-      \  f\"hard={len(packed)} bytes | \"\n            f\"soft={self.soft_target_bits}\
-      \ float32 values\"\n        )\n\n        self._reset_search()\n\n    def general_work(self,\
-      \ input_items, output_items):\n        x = input_items[0]\n        s = input_items[1]\n\
-      \        n = min(len(x), len(s))\n\n        for idx in range(n):\n         \
-      \   bit = int(x[idx]) & 1\n            soft = float(s[idx])\n\n            if\
-      \ self.state == \"SEARCH\":\n                self.shiftreg = (\n           \
-      \         ((self.shiftreg << 1) | bit) & self.sync_mask\n                )\n\
-      \n                # Save the soft metric at exactly the same stream position.\n\
-      \                self.sync_soft_buf[self.sync_soft_write] = soft\n         \
-      \       self.sync_soft_write += 1\n                if self.sync_soft_write >=\
-      \ self.sync_len:\n                    self.sync_soft_write = 0\n\n         \
-      \       if self.search_count < self.sync_len:\n                    self.search_count\
+      \            pmt.cons(pmt.PMT_NIL, vec)\n        )\n\n        # One detection\
+      \ number shared by the soft and IQ outputs.\n        # SPK1: 4-byte magic, 32-bit\
+      \ network-order detection ID.\n        detection_id = self.detections\n    \
+      \    soft_bytes = struct.pack(\"!4sI\", b\"SPK1\", detection_id) + (\n     \
+      \       self.soft_buf[:self.soft_target_bits].astype(\"<f4\", copy=False).tobytes()\n\
+      \        )\n        soft_vec = pmt.init_u8vector(len(soft_bytes), array.array(\"\
+      B\", soft_bytes))\n        self.message_port_pub(\n            self.soft_out_port,\n\
+      \            pmt.cons(pmt.PMT_NIL, soft_vec)\n        )\n\n        # IQF1: 4-byte\
+      \ magic, uint32 detection ID, uint16 fragment\n        # index, uint16 total\
+      \ fragments, uint32 complex sample count.\n        # Small UDP datagrams avoid\
+      \ the 65507-byte IPv4 UDP limit.\n        iq_bytes = self.iq_buf[:self.soft_target_bits].astype(\n\
+      \            \"<c8\", copy=False\n        ).tobytes()\n        frag_size = 24000\
+      \  # a multiple of complex64's 8 bytes\n        frag_count = (len(iq_bytes)\
+      \ + frag_size - 1) // frag_size\n        for part in range(frag_count):\n  \
+      \          fragment = iq_bytes[part * frag_size:(part + 1) * frag_size]\n  \
+      \          frame = struct.pack(\n                \"!4sIHHI\", b\"IQF1\", detection_id,\
+      \ part,\n                frag_count, self.soft_target_bits\n            ) +\
+      \ fragment\n            iq_vec = pmt.init_u8vector(len(frame), array.array(\"\
+      B\", frame))\n            self.message_port_pub(\n                self.iq_out_port,\n\
+      \                pmt.cons(pmt.PMT_NIL, iq_vec)\n            )\n\n        print(\n\
+      \            \"RF PAYLOAD EMITTED | \"\n            f\"hard={len(packed)} bytes\
+      \ | \"\n            f\"soft={self.soft_target_bits} float32 values\"\n     \
+      \   )\n\n        self._reset_search()\n\n    def general_work(self, input_items,\
+      \ output_items):\n        x = input_items[0]\n        s = input_items[1]\n \
+      \       iq = input_items[2]\n        n = min(len(x), len(s), len(iq))\n\n  \
+      \      for idx in range(n):\n            bit = int(x[idx]) & 1\n           \
+      \ soft = float(s[idx])\n\n            if self.state == \"SEARCH\":\n       \
+      \         self.shiftreg = (\n                    ((self.shiftreg << 1) | bit)\
+      \ & self.sync_mask\n                )\n\n                # Save the soft metric\
+      \ at exactly the same stream position.\n                self.sync_soft_buf[self.sync_soft_write]\
+      \ = soft\n                self.sync_soft_write += 1\n                if self.sync_soft_write\
+      \ >= self.sync_len:\n                    self.sync_soft_write = 0\n\n      \
+      \          if self.search_count < self.sync_len:\n                    self.search_count\
       \ += 1\n\n                if self.search_count >= self.sync_len:\n         \
       \           distance = (\n                        self.shiftreg ^ self.sync_int\n\
       \                    ).bit_count()\n\n                    # Very safe hard decision.\n\
@@ -543,15 +562,16 @@ blocks:
       \ 1\n                if self.skip_left <= 0:\n                    self.state\
       \ = \"COLLECT\"\n                    self.pos = 0\n                continue\n\
       \n            if self.state == \"COLLECT\":\n                self.buf[self.pos]\
-      \ = bit\n                self.soft_buf[self.pos] = soft\n                self.pos\
-      \ += 1\n\n                if self.pos >= self.target_bits:\n               \
-      \     self._emit()\n\n        self.consume(0, n)\n        self.consume(1, n)\n\
-      \        return 0\n"
+      \ = bit\n                self.soft_buf[self.pos] = soft\n                self.iq_buf[self.pos]\
+      \ = iq[idx]\n                self.pos += 1\n\n                if self.pos >=\
+      \ self.target_bits:\n                    self._emit()\n\n        self.consume(0,\
+      \ n)\n        self.consume(1, n)\n        self.consume(2, n)\n        return\
+      \ 0\n"
     affinity: ''
     alias: ''
-    comment: 'Balanced low-SNR detector: hard <=1840; soft rescue only for 1841..1900
-      with normalized score >=0.12. This reduces false/orphan payloads while retaining
-      rescue of previously observed real packets (e.g. 1872 errors, score 0.1457).'
+    comment: Hard+soft 4096-bit sync. For every fully detected packet sends SPK1 prefixed
+      float32 soft PDU on UDP 5002 and IQF1 fragmented complex64 PDU on UDP 5003,
+      same detection ID.
     maxoutbuf: '0'
     minoutbuf: '0'
     plain_bytes: '1502'
@@ -563,17 +583,19 @@ blocks:
     _io_cache: '(''4096-bit hard+soft low-SNR detector'', ''blk'', [(''skip_header_bits'',
       ''96''), (''plain_bytes'', ''488''), (''soft_bits'', ''3900''), (''vogeo_bytes'',
       ''488''), (''sync_tag'', "''unused''")], [(''0'', ''byte'', 1), (''1'', ''float'',
-      1)], [(''soft_pdus'', ''message'', 1), (''pdus'', ''message'', 1)], ''\n    4096-bit
-      low-SNR packet detector with soft-assisted acquisition.\n\n    Input 0: differentially
-      decoded hard bits (uint8)\n    Input 1: aligned DBPSK soft metric (float32),
-      negative=0, positive=1\n\n    Detection policy:\n      1) hard accept when Hamming
-      distance <= 1840/4096\n      2) for 1841..1900 errors, accept only when normalized
-      soft\n         correlation with the known 4096-bit sync word is >= 0.10\n\n    Packet
-      extraction / UDP payload behavior is unchanged.\n    '', [''skip_header_bits''])'
+      1), (''2'', ''complex'', 1)], [(''iq_pdus'', ''message'', 1), (''soft_pdus'',
+      ''message'', 1), (''pdus'', ''message'', 1)], ''\n    4096-bit low-SNR packet
+      detector with soft-assisted acquisition.\n\n    Input 0: differentially decoded
+      hard bits (uint8)\n    Input 1: aligned DBPSK soft metric (float32), negative=0,
+      positive=1\n    Input 2: same-symbol, post-Costas complex64 samples (not raw
+      USRP IQ)\n\n    Detection policy:\n      1) hard accept when Hamming distance
+      <= 1840/4096\n      2) for 1841..1900 errors, accept only when normalized soft\n         correlation
+      with the known 4096-bit sync word is >= 0.10\n\n    Packet extraction / UDP
+      payload behavior is unchanged.\n    '', [''skip_header_bits''])'
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [1272, 836.0]
+    coordinate: [1248, 760.0]
     rotation: 0
     state: enabled
 - name: epy_dbpsk_soft
@@ -646,12 +668,12 @@ blocks:
   parameters:
     affinity: ''
     alias: ''
-    comment: 'Sends 3900 aligned DBPSK soft values as raw little-endian float32 bytes:
-      exactly 15600 bytes per UDP datagram to RX Python on port 5002.'
+    comment: 'Detected packets only: SPK1 (8-byte detection ID) followed by 12016
+      float32 soft values on UDP 5002.'
     host: 127.0.0.1
     maxoutbuf: '0'
     minoutbuf: '0'
-    mtu: '40000'
+    mtu: '65000'
     port: '5002'
     tcp_no_delay: 'False'
     type: UDP_CLIENT
@@ -660,6 +682,28 @@ blocks:
     bus_source: false
     bus_structure: null
     coordinate: [1656, 676.0]
+    rotation: 0
+    state: enabled
+- name: network_socket_pdu_iq
+  id: network_socket_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 'Detected packets only: IQF1 UDP fragments (complex64 after Costas),
+      with shared detection counter. RX Python reconstructs and validates fragment
+      count.'
+    host: 127.0.0.1
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    mtu: '30000'
+    port: '5003'
+    tcp_no_delay: 'False'
+    type: UDP_CLIENT
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1696, 864.0]
     rotation: 0
     state: enabled
 - name: pdu_pdu_to_tagged_stream_0
@@ -768,7 +812,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [776, 796.0]
+    coordinate: [696, 824.0]
     rotation: 0
     state: disabled
 - name: qtgui_freq_sink_x_0
@@ -849,7 +893,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [280, 896.0]
+    coordinate: [200, 920.0]
     rotation: 0
     state: disabled
 - name: qtgui_time_sink_x_0
@@ -1772,11 +1816,13 @@ connections:
 - [digital_constellation_modulator_0, '0', blocks_tagged_stream_multiply_length_0,
   '0']
 - [digital_costas_loop_cc_0, '0', digital_constellation_decoder_cb_0, '0']
+- [digital_costas_loop_cc_0, '0', epy_block_dual_packet_0, '2']
 - [digital_costas_loop_cc_0, '0', epy_dbpsk_soft, '0']
 - [digital_costas_loop_cc_0, '0', qtgui_const_sink_x_0, '0']
 - [digital_diff_decoder_bb_0, '0', epy_block_dual_packet_0, '0']
 - [digital_protocol_formatter_bb_0, '0', blocks_tagged_stream_mux_0, '1']
 - [digital_symbol_sync_xx_0, '0', digital_costas_loop_cc_0, '0']
+- [epy_block_dual_packet_0, iq_pdus, network_socket_pdu_iq, pdus]
 - [epy_block_dual_packet_0, soft_pdus, network_socket_pdu_0_0, pdus]
 - [epy_dbpsk_soft, '0', blocks_multiply_const_vxx_0, '0']
 - [network_socket_pdu_0, pdus, pdu_pdu_to_tagged_stream_0, pdus]
