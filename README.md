@@ -29,7 +29,6 @@ The method is evaluated in two ways:
 1. **Software simulation**: AWGN and block-Rayleigh channels with exact E<sub>s</sub>/N<sub>0</sub> control.
 2. **Over-the-air (OTA) testbed**: two USRP B210 radios at 868 MHz running a GNU Radio BPSK link. All methods are sent in the same packet so they see the same channel.
 
-> In the code, the learned transmitter and receiver are called **VOGEO** (`vogeo_tx.py`, `vogeo_rx.py`).
 
 ## Highlights
 
