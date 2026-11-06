@@ -1,0 +1,27 @@
+# Python dependencies for the simulation (deploy_soft/), the OTA scripts (ota/)
+# and the latency benchmarks. Tested with Python 3.12 on Linux, CPU only.
+#
+# GNU Radio and UHD are NOT installed from here. Install them from your system
+# package manager or radioconda; see "Environment setup" in README.md.
+#
+# CPU-only PyTorch (much smaller download than the default CUDA build):
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Neural codec and learned models
+torch==2.12.1
+torchaudio==2.11.0
+encodec==0.1.1
+numpy==2.5.0
+
+# Audio I/O and speech-quality metrics
+soundfile==0.14.0
+pesq==0.0.4          # compiles a C extension: needs a C compiler and Python headers
+pystoi==0.4.1
+
+# Signal processing, tables and plots
+scipy==1.18.1
+pandas==3.1.1
+matplotlib==3.11.0
+
+# Optional: limits BLAS threads per worker in the simulation and benchmarks
+threadpoolctl==3.8.0
