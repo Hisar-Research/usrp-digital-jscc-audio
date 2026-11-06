@@ -2,9 +2,9 @@
 SNR sweep of the deployed bundle against three equal-rate baselines, over AWGN
 and block-Rayleigh fading, with matched and mismatched noise-variance knowledge.
 
-Every method spends the same 40 bits/frame = 3.0 kbps, takes SOFT channel input
-(LLRs) and makes a HARD index decision per frame, so the comparison is
-like-for-like with the proposed receiver:
+Every method spends 40 bits/frame = 3.0 kbps (M3.2: 3008 bits per 75 frames, 0.3%
+more, as over the air), takes SOFT channel input (LLRs) and makes a HARD index
+decision per frame, so the comparison is like-for-like with the proposed receiver:
 
   M1   Proposed       : the bundle. 30 RVQ index bits sent as is + 10 learned
                         parity bits; causal soft receiver, argmax output.
@@ -18,8 +18,10 @@ like-for-like with the proposed receiver:
                         forward in time (causal, no added delay); the MAP index
                         of the filtered posterior is decoded. Hard output: this
                         is SBSD, not SBSD-S (no MMSE latent).
-  M3.2 LDPC 3/4       : (3008, 2256) quasi-cyclic LDPC, normalized min-sum.
-                        One code block = 75.2 frames, ~1 s of buffering.
+  M3.2 LDPC 3/4       : the (3008, 2256) IRA-LDPC code of the over-the-air
+                        experiments, normalized min-sum. One codeword per 75
+                        frames: 2250 source bits, 6 known zeros and 752 parity
+                        bits, ~1 s of buffering.
   M2   Uncoded        : EnCodec at 3.0 kbps (n_q = 4), slicer.
 
 The convolutional baseline of selftest_sim_v2.py is gone.
@@ -52,10 +54,10 @@ delay, and the LDPC block already spans ~75 frames of fading.
 SNR MISMATCH (--mismatch_db). The receiver forms its LLRs from
 sigma_hat^2 = sigma^2 * 10^(-m/10): it believes Es/N0 is m dB higher than it
 is. m > 0 gives over-confident LLRs, m < 0 under-confident ones. The slicer
-(M2) and min-sum (M3.2) are invariant to a common LLR scale, so they are
-unaffected by construction; M1 and SBSD are not, because both weigh the
-channel against prior knowledge. The mismatch is applied identically to all
-methods.
+(M2) is invariant to a common LLR scale, and so is min-sum (M3.2) except for
+the fixed floor on its 6 known zeros, which has no practical effect; M1 and SBSD
+are not, because both weigh the channel against prior knowledge. The mismatch
+is applied identically to all methods.
 
 COMMON RANDOM NUMBERS. Noise is drawn once per (file, trial, method) and
 fading once per (file, trial); both are reused at every SNR, every mismatch
@@ -119,10 +121,12 @@ N_Q_UNCODED = 4                           # M2: 4 x 10 = 40 bits/frame
 N_Q_CODED   = 3                           # M1, M3.1, M3.2: 30 index bits + 10 protection
 CODEBOOK    = 1 << BITS_PER_CODE          # 1024
 LDPC_N, LDPC_K = 3008, 2256               # rate 2256/3008 = 3/4 exactly
-LDPC_Z         = 47                       # 3008 = 64*47, 2256 = 48*47
-LDPC_COL_W     = 3                        # (3, 12)-regular
+LDPC_SOURCE_BITS = 2250                   # 75 frames x 3 layers x 10 bits
+LDPC_PAD_BITS    = LDPC_K - LDPC_SOURCE_BITS  # 6 known zeros
+LDPC_CHECK_INFO_DEG = 9                   # information bits per check
 LDPC_ALPHA     = 0.8                      # normalized min-sum scale
-LDPC_MAX_ITERS = 50
+LDPC_MAX_ITERS = 40
+LDPC_KNOWN_ZERO_LLR = 50.0                # floor on the known zeros
 FRAME_RATE  = 75
 BW_PER_LAYER_KBPS = math.log2(CODEBOOK) * FRAME_RATE / 1000      # 0.75
 SEED = 20260914
@@ -418,121 +422,67 @@ def load_or_build_prior(args, n_q, test_files):
 
 
 # =========================================================
-# (3008, 2256) QUASI-CYCLIC LDPC + NORMALIZED MIN-SUM  (unchanged from v2)
+# (3008, 2256) IRA-LDPC + NORMALIZED MIN-SUM  (the over-the-air code)
 # =========================================================
-def _base_graph(mb, nb, col_w, row_w, rng):
-    """Regular bipartite base graph: column j -> col_w DISTINCT rows, every
-    row ends at exactly row_w. Greedy with capacity, restart on a dead end."""
-    for _ in range(1000):
-        cap = np.full(mb, row_w); cols = []; ok = True
-        for _j in range(nb):
-            avail = np.nonzero(cap > 0)[0]
-            if len(avail) < col_w:
-                ok = False; break
-            pick = rng.choice(avail, size=col_w, replace=False,
-                              p=cap[avail] / cap[avail].sum())
-            cap[pick] -= 1; cols.append(pick)
-        if ok and (cap == 0).all():
-            return cols
-    raise RuntimeError("no simple regular base graph found")
+def build_ira_ldpc():
+    """The deterministic IRA code of the OTA experiments, H = [A | B], as in
+    tx_four_methods_with_ldpc.py / rx_four_methods_soft_ldpc.py of
+    Hisar-Research/usrp-digital-jscc-audio. Not a standardized code.
+
+    A: every information bit joins 3 checks, every check takes 9 information
+       bits. B: dual-diagonal accumulator, check i holds p_i and p_{i-1}.
+
+    Returns (check_vars, info_checks, info). check_vars is [m, 11] for
+    nms_decode. Check 0 has only 10 edges, so its last entry is index n: a
+    virtual variable fixed to 0, which is exactly the accumulator's p_{-1} = 0.
+    info_checks is the [k, 3] check list of each information bit, for encoding."""
+    n, k, m = LDPC_N, LDPC_K, LDPC_N - LDPC_K
+    j = np.arange(k, dtype=np.int64)
+    group, r = j // m, j % m
+    info_checks = np.stack((r, (87 * r + 103 + 128 * group) % m,
+                            (75 * r + 561 + 448 * group) % m), axis=1)
+    assert (info_checks[:, 0] != info_checks[:, 1]).all() \
+        and (info_checks[:, 0] != info_checks[:, 2]).all() \
+        and (info_checks[:, 1] != info_checks[:, 2]).all(), "repeated check on a bit"
+    assert (np.bincount(info_checks.ravel(), minlength=m) == LDPC_CHECK_INFO_DEG).all(), \
+        "check degrees of A are not all 9"
+    rows = [[] for _ in range(m)]
+    for var, checks in enumerate(info_checks):
+        for chk in checks:
+            rows[chk].append(var)
+    for chk in range(m):
+        rows[chk] += [k + chk - 1 if chk else n, k + chk]
+    check_vars = np.array(rows, dtype=np.int64)
+
+    Hd = np.zeros((m, n + 1), dtype=np.int32)
+    Hd[np.arange(m)[:, None], check_vars] = 1
+    ov = Hd[:, :n] @ Hd[:, :n].T
+    np.fill_diagonal(ov, 0)
+    info = {"n": n, "k": k, "source_bits": LDPC_SOURCE_BITS, "known_zero_bits": LDPC_PAD_BITS,
+            "structure": "IRA, H = [A | B], B dual-diagonal",
+            "info_degree": int(info_checks.shape[1]), "check_info_degree": LDPC_CHECK_INFO_DEG,
+            "four_cycles": int((ov[np.triu_indices(m, 1)] >= 2).sum()),
+            "graph_crc32": int(zlib.crc32(check_vars.tobytes()) & 0xFFFFFFFF)}
+    return check_vars, info_checks, info
 
 
-def build_qc_ldpc(n, k, Z, col_w, rng):
-    """Lift a regular base matrix by circulant permutations of size Z. Any
-    4-cycle in the lifted graph shows up at the base level as a 2x2 block whose
-    shifts satisfy s11 - s12 + s22 - s21 = 0 (mod Z); those are resampled."""
-    nb, mb = n // Z, (n - k) // Z
-    assert nb * Z == n and mb * Z == n - k, f"({n},{k}) not multiples of Z={Z}"
-    row_w = col_w * nb // mb
-    assert row_w * mb == col_w * nb, "regular degrees do not balance"
-    cols = _base_graph(mb, nb, col_w, row_w, rng)
-    base = -np.ones((mb, nb), dtype=np.int64)
-    for j in range(nb):
-        for i in cols[j]:
-            base[i, j] = rng.integers(Z)
-
-    def find_4cycle():
-        for j1 in range(nb):
-            r1 = base[:, j1] >= 0
-            for j2 in range(j1 + 1, nb):
-                rows = np.nonzero(r1 & (base[:, j2] >= 0))[0]
-                for a in range(len(rows)):
-                    for b in range(a + 1, len(rows)):
-                        i1, i2 = rows[a], rows[b]
-                        if (base[i1, j1] - base[i1, j2] + base[i2, j2] - base[i2, j1]) % Z == 0:
-                            return i1, j1
-        return None
-
-    fixes = 0
-    while (c := find_4cycle()) is not None:
-        base[c] = rng.integers(Z); fixes += 1
-        assert fixes < 100000, "could not clear 4-cycles"
-
-    H = np.zeros((mb * Z, nb * Z), dtype=np.uint8)
-    eye = np.eye(Z, dtype=np.uint8)
-    for i in range(mb):
-        for j in range(nb):
-            if base[i, j] >= 0:
-                H[i*Z:(i+1)*Z, j*Z:(j+1)*Z] = np.roll(eye, base[i, j], axis=1)
-    return H, base, fixes
-
-
-def gf2_rref(H):
-    """Row-reduce over GF(2). Returns (reduced rows, pivot columns)."""
-    R = H.copy(); m, n = R.shape; piv = []; r = 0
-    for c in range(n):
-        if r >= m:
-            break
-        nz = np.nonzero(R[r:, c])[0]
-        if len(nz) == 0:
-            continue
-        p = r + nz[0]
-        if p != r:
-            R[[r, p]] = R[[p, r]]
-        mask = R[:, c].astype(bool); mask[r] = False
-        R[mask] ^= R[r]
-        piv.append(c); r += 1
-    return R[:r], piv
-
-
-def build_ldpc(n, k, Z, col_w, seed):
-    """Returns (check_vars, A, info). Decode on the sparse H[:, perm], encode
-    with the dense A. Column order perm puts the k info positions first and the
-    m pivot (parity) positions last, so codeword = [u | A @ u mod 2]. The seed
-    is retried if H is rank-deficient, which would make k_true > k."""
-    m = n - k
-    for attempt in range(20):
-        rng = np.random.default_rng(seed + attempt)
-        H, base, fixes = build_qc_ldpc(n, k, Z, col_w, rng)
-        R, piv = gf2_rref(H)
-        if len(piv) == m:
-            break
-    else:
-        raise RuntimeError(f"no full-rank ({n},{k}) code in 20 seeds")
-    nonpiv = [c for c in range(n) if c not in set(piv)]
-    perm = np.array(nonpiv + piv)
-    A = R[:, nonpiv]                                     # [m, k] dense
-    Hp = H[:, perm]
-    rows = [np.nonzero(Hp[i])[0] for i in range(m)]
-    assert len({len(r) for r in rows}) == 1, "rows not regular"
-    check_vars = np.stack(rows)                          # [m, row_w]
-    ov = Hp.astype(np.int32) @ Hp.T.astype(np.int32); np.fill_diagonal(ov, 0)
-    info = {"n": n, "k": k, "Z": Z, "base_shape": list(base.shape),
-            "col_w": col_w, "row_w": int(check_vars.shape[1]),
-            "girth_ge_6": bool(ov.max() <= 1), "rank": len(piv),
-            "cycle_fixes": fixes, "seed": seed + attempt,
-            "base_crc32": int(zlib.crc32(base.tobytes()) & 0xFFFFFFFF)}
-    return check_vars, A, info
-
-
-def ldpc_encode(A, u):
-    return np.concatenate([u, (A.astype(np.int32) @ u.astype(np.int32)) % 2]).astype(np.uint8)
+def ldpc_encode(info_checks, source):
+    """2250 source bits -> 3008 bits, [source | 6 known zeros | 752 parity]."""
+    u = np.concatenate([source, np.zeros(LDPC_PAD_BITS, dtype=np.uint8)])
+    syndrome = np.zeros(LDPC_N - LDPC_K, dtype=np.uint8)
+    for e in range(info_checks.shape[1]):
+        np.bitwise_xor.at(syndrome, info_checks[:, e], u)
+    return np.concatenate([u, np.bitwise_xor.accumulate(syndrome)]).astype(np.uint8)
 
 
 def nms_decode(llr, check_vars, alpha=LDPC_ALPHA, max_iters=LDPC_MAX_ITERS):
     """Normalized min-sum, flooding schedule, early stop on a clean syndrome.
-    Input convention: L > 0 means bit 1; negated on entry (see v2)."""
+    llr [3008], L > 0 means bit 1; negated on entry, so L > 0 means bit 0 below.
+    The 6 known zeros are held at L >= LDPC_KNOWN_ZERO_LLR, whatever arrived."""
     lam = -np.asarray(llr, dtype=np.float64)
+    lam[LDPC_SOURCE_BITS:LDPC_K] = np.maximum(lam[LDPC_SOURCE_BITS:LDPC_K],
+                                              LDPC_KNOWN_ZERO_LLR)
+    lam = np.append(lam, np.inf)                                   # p_{-1} = 0
     m, dc = check_vars.shape
     n = len(lam)
     v2c = lam[check_vars]                                          # [m, dc]
@@ -551,25 +501,29 @@ def nms_decode(llr, check_vars, alpha=LDPC_ALPHA, max_iters=LDPC_MAX_ITERS):
         L = lam + tot_in
         x = (L < 0).astype(np.uint8)
         if not np.bitwise_xor.reduce(x[check_vars], axis=1).any():
-            return x, it, True
+            return x[:-1], it, True
         v2c = L[check_vars] - c2v
-    return x, max_iters, False
+    return x[:-1], max_iters, False
 
 
-def ldpc_encode_stream(info_bits, A, k):
-    n_blocks = int(math.ceil(len(info_bits) / k))
-    pad = n_blocks * k - len(info_bits)
+def ldpc_encode_stream(info_bits, info_checks):
+    """One codeword per 75-frame chunk, as over the air. A short last chunk is
+    filled with zeros that the receiver is not told about."""
+    n_blocks = int(math.ceil(len(info_bits) / LDPC_SOURCE_BITS))
+    pad = n_blocks * LDPC_SOURCE_BITS - len(info_bits)
     padded = np.concatenate([info_bits, np.zeros(pad, dtype=np.uint8)])
-    return (np.concatenate([ldpc_encode(A, padded[b * k:(b + 1) * k])
+    return (np.concatenate([ldpc_encode(info_checks,
+                                        padded[b * LDPC_SOURCE_BITS:(b + 1) * LDPC_SOURCE_BITS])
                             for b in range(n_blocks)]), n_blocks, pad)
 
 
-def ldpc_decode_stream(llr_stream, check_vars, k, n, n_info, alpha, max_iters):
+def ldpc_decode_stream(llr_stream, check_vars, n_info, alpha, max_iters):
     out, its, fails = [], 0, 0
-    n_blocks = len(llr_stream) // n
+    n_blocks = len(llr_stream) // LDPC_N
     for b in range(n_blocks):
-        x, it, ok = nms_decode(llr_stream[b * n:(b + 1) * n], check_vars, alpha, max_iters)
-        out.append(x[:k]); its += it; fails += (not ok)
+        x, it, ok = nms_decode(llr_stream[b * LDPC_N:(b + 1) * LDPC_N], check_vars,
+                               alpha, max_iters)
+        out.append(x[:LDPC_SOURCE_BITS]); its += it; fails += (not ok)
     return np.concatenate(out)[:n_info], its / max(n_blocks, 1), fails
 
 
@@ -687,13 +641,13 @@ def _init_worker(cfg):
         except ImportError:
             pass
     tx, rx = VogeoTx(cfg["bundle"]), VogeoRx(cfg["bundle"])
-    check_vars, A, _ = build_ldpc(LDPC_N, LDPC_K, LDPC_Z, LDPC_COL_W, SEED)
+    check_vars, info_checks, _ = build_ira_ldpc()
     ec = EncodecModel.encodec_model_24khz().eval()
     ec.set_target_bandwidth(1.5)                      # arbitrary; always overridden
     for p in ec.parameters():
         p.requires_grad = False
     z = np.load(cfg["prior_cache"])
-    _CTX.update(cfg, tx=tx, rx=rx, ec=ec, check_vars=check_vars, A=A,
+    _CTX.update(cfg, tx=tx, rx=rx, ec=ec, check_vars=check_vars, info_checks=info_checks,
                 blk=BlockCodes(cfg["blk_parity"]),
                 trans=[z["trans"][q].astype(np.float32) for q in range(N_Q_CODED)],
                 log_u=[np.log(z["unigram"][q]).astype(np.float32) for q in range(N_Q_CODED)])
@@ -771,7 +725,7 @@ def _run_file(job):
             "M3.1": blk.encode(c3).reshape(-1),                          # [T*40]
             "M2": codes_to_bitstream(c4)}                                # [T*40]
     info3 = codes_to_bitstream(c3)
-    coded4, n_blk, _ = ldpc_encode_stream(info3, c["A"], LDPC_K)
+    coded4, n_blk, _ = ldpc_encode_stream(info3, c["info_checks"])
     bits["M3.2"] = coded4
     for m in ("M1", "M3.1", "M2"):
         assert bits[m].size == T * TOTAL_BITS_PER_FRAME, f"{m}: {bits[m].size} bits"
@@ -827,10 +781,10 @@ def _run_file(job):
                          {"raw_ber": float(raw["M3.1"][si]),
                           "ml_acc": float((ml3[si] == c3).mean())})
 
-                # ---- M3.2: QC-LDPC, normalized min-sum ----
+                # ---- M3.2: IRA-LDPC, normalized min-sum ----
                 for si in range(S):
                     dec, _, n_fail = ldpc_decode_stream(
-                        llr["M3.2"][si], c["check_vars"], LDPC_K, LDPC_N, info3.size,
+                        llr["M3.2"][si], c["check_vars"], info3.size,
                         c["ldpc_alpha"], c["ldpc_iters"])
                     emit(base, "M3.2", si, bitstream_to_codes(dec, N_Q_CODED, T), c3,
                          {"raw_ber": float(raw["M3.2"][si]),
@@ -847,7 +801,7 @@ def _run_file(job):
 # =========================================================
 # SELF-TEST (code level, no audio)
 # =========================================================
-def selftest(blk_parity, check_vars=None, A_ldpc=None):
+def selftest(blk_parity, check_vars=None, info_checks=None):
     """Raises on any failure; returns a short report."""
     rng = np.random.default_rng(SEED)
     rep = []
@@ -902,11 +856,18 @@ def selftest(blk_parity, check_vars=None, A_ldpc=None):
     assert np.allclose(L3 / L, 10 ** 0.3, rtol=1e-5), "mismatch must scale the LLR"
     rep.append(f"fading E|h|^2 = {np.mean(h ** 2):.3f}; LLR and mismatch scaling OK")
     if check_vars is not None:
-        u0 = rng.integers(0, 2, LDPC_K, dtype=np.uint8)
-        x0, _, ok0 = nms_decode(np.where(ldpc_encode(A_ldpc, u0) == 1, 30.0, -30.0),
-                                check_vars)
-        assert ok0 and np.array_equal(x0[:LDPC_K], u0), "LDPC noiseless round trip failed"
-        rep.append("LDPC noiseless round trip OK")
+        u0 = rng.integers(0, 2, LDPC_SOURCE_BITS, dtype=np.uint8)
+        c0 = ldpc_encode(info_checks, u0)
+        assert not c0[LDPC_SOURCE_BITS:LDPC_K].any(), "LDPC pad bits must be zero"
+        assert not np.bitwise_xor.reduce(np.append(c0, 0)[check_vars], axis=1).any(), \
+            "LDPC codeword fails H c = 0"
+        l0 = np.where(c0 == 1, 30.0, -30.0)
+        x0, _, ok0 = nms_decode(l0, check_vars)
+        assert ok0 and np.array_equal(x0, c0), "LDPC noiseless round trip failed"
+        l0[LDPC_SOURCE_BITS:LDPC_K] = 30.0                  # all 6 pad bits arrive wrong
+        x1, it1, ok1 = nms_decode(l0, check_vars)
+        assert ok1 and it1 == 1 and np.array_equal(x1, c0), "known zeros were not enforced"
+        rep.append("IRA-LDPC H c = 0, noiseless round trip and known zeros OK")
     return rep
 
 
@@ -1070,9 +1031,8 @@ def main():
                          f"{TOTAL_BITS_PER_FRAME - N_Q_CODED * BITS_PER_CODE}")
 
     t0 = time.time()
-    check_vars, A_ldpc, ldpc_info = build_ldpc(LDPC_N, LDPC_K, LDPC_Z, LDPC_COL_W, SEED)
-    assert ldpc_info["girth_ge_6"] and ldpc_info["rank"] == LDPC_N - LDPC_K
-    rep = selftest(args.blk_parity, check_vars, A_ldpc)
+    check_vars, info_checks, ldpc_info = build_ira_ldpc()
+    rep = selftest(args.blk_parity, check_vars, info_checks)
     print(f"self-test OK in {time.time() - t0:.1f}s")
     for line in rep:
         print(f"  {line}")
@@ -1111,7 +1071,7 @@ def main():
           f"latency {m1_lat:6.1f} ms")
     print(f"M3.1      n_q={N_Q_CODED} + per-index codes {', '.join(blk.describe())}; "
           f"SBSD (Markov prior, forward filtering), MAP output  latency {m1_lat:6.1f} ms")
-    print(f"M3.2      n_q={N_Q_CODED} + QC-LDPC ({LDPC_N},{LDPC_K}), NMS alpha="
+    print(f"M3.2      n_q={N_Q_CODED} + IRA-LDPC ({LDPC_N},{LDPC_K}), NMS alpha="
           f"{args.ldpc_alpha} <= {args.ldpc_iters} it  latency {m1_lat + ldpc_lat:6.1f} ms")
     print(f"M2        n_q={N_Q_UNCODED}, slicer  latency {m1_lat:6.1f} ms")
     print(f"channels  {args.channels} x mismatch {mismatches} dB -> {len(scenarios)} "
@@ -1138,9 +1098,10 @@ def main():
                  "prior_heldout_bits_per_index": prior["heldout_bits_per_index"].tolist(),
                  "prior_n_files": int(prior["n_files"]), "prior_n_frames": int(prior["n_frames"]),
                  "latency_ms": m1_lat},
-        "m3_2": {"n_q": N_Q_CODED, "code_rate": "3/4", "code": "QC-LDPC",
+        "m3_2": {"n_q": N_Q_CODED, "code_rate": "3/4", "code": "IRA-LDPC",
                  "decoder": "normalized min-sum", "alpha": args.ldpc_alpha,
-                 "max_iters": args.ldpc_iters, "latency_ms": m1_lat + ldpc_lat, **ldpc_info},
+                 "max_iters": args.ldpc_iters, "known_zero_llr": LDPC_KNOWN_ZERO_LLR,
+                 "latency_ms": m1_lat + ldpc_lat, **ldpc_info},
         "m2": {"n_q": N_Q_UNCODED, "decision": "slicer", "latency_ms": m1_lat},
     }
 
@@ -1149,7 +1110,8 @@ def main():
     run_cfg = {k: meta[k] for k in ("snr_grid", "channels", "mismatch_db", "coherence_frames",
                                     "trials", "seconds", "test_dir")}
     run_cfg.update(blk_parity=args.blk_parity, pesq_mode=args.pesq_mode,
-                   prior_crc=int(prior.get("files_crc32", 0)))
+                   prior_crc=int(prior.get("files_crc32", 0)),
+                   ldpc_crc=ldpc_info["graph_crc32"], ldpc_iters=args.ldpc_iters)
     done = set()
     if args.resume and os.path.exists(cfg_json):
         old = json.load(open(cfg_json))

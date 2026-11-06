@@ -6,9 +6,10 @@ Reads P_rows.csv, P_ceil.csv and (optionally) P_summary.json written with
 
   fig_<scenario>.pdf/png        one per scenario: PESQ, ESTOI, SI-SDR and
                                 codeword accuracy vs Es/N0, all methods, with
-                                bootstrap confidence bands and codec ceilings
-  overview_<metric>.pdf/png     one panel per channel; colour = method, line
-                                style = SNR mismatch (solid = perfect)
+                                codec ceilings
+  overview_<metric>.pdf/png     one panel per channel; colour = method; with
+                                several mismatches, line style = SNR mismatch
+                                (solid = perfect)
   mismatch_delta_<metric>       paired change caused by the SNR mismatch,
                                 metric(mismatched) - metric(perfect), per method
   fading_penalty_<metric>       paired change from AWGN to Rayleigh at the same
@@ -16,9 +17,10 @@ Reads P_rows.csv, P_ceil.csv and (optionally) P_summary.json written with
   P_table.txt                   ESTOI / PESQ / accuracy at selected SNRs
 
 Every value is first averaged over trials within an utterance, then over
-utterances; bands are utterance-level percentile bootstraps of the mean. The
-differences are paired per utterance, which the common random numbers of the
-simulation make exact (same noise and fading in both scenarios).
+utterances; the table's intervals are utterance-level percentile bootstraps of
+the mean. The figures show means only. The differences are paired per
+utterance, which the common random numbers of the simulation make exact (same
+noise and fading in both scenarios).
 
 A PESQ call that failed (silent or degenerate output) is stored as an empty
 cell; it is counted as --pesq_fail (default 1.0, the bottom of the MOS-LQO
@@ -44,31 +46,45 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 METHODS = ("M1", "M3.1", "M3.2", "M2")
-# categorical slots 1-4 of the reference palette, validated for adjacent-pair
-# CVD separation; identity is also carried by the marker, so it is never
-# colour alone
+# identity is carried by colour, line style and marker together
 STYLE = {
-    "M1":   {"label": "Proposed (M1)",         "color": "#2a78d6", "marker": "o"},
-    "M3.1": {"label": "Hamming + SBSD (M3.1)", "color": "#eb6834", "marker": "^"},
-    "M3.2": {"label": "LDPC 3/4 (M3.2)",       "color": "#1baf7a", "marker": "D"},
-    "M2":   {"label": "Uncoded (M2)",          "color": "#eda100", "marker": "s"},
+    "M1":   {"label": "Proposed (M1)",         "color": "#1f77b4", "marker": "o", "ls": "-"},
+    "M3.1": {"label": "Hamming + SBSD (M3.1)", "color": "#2ca02c", "marker": "^", "ls": "-."},
+    "M3.2": {"label": "LDPC 3/4 (M3.2)",       "color": "#9467bd", "marker": "D",
+             "ls": (0, (3, 1.5, 1, 1.5, 1, 1.5))},
+    "M2":   {"label": "Uncoded (M2)",          "color": "#7f7f7f", "marker": "s", "ls": "--"},
 }
 METRICS = {"pesq": "PESQ", "estoi": "ESTOI", "sisdr": "SI-SDR (dB)",
            "code_acc": "Codeword accuracy"}
 CHANNEL_NAME = {"awgn": "AWGN", "rayleigh": "Rayleigh, perfect CSI",
                 "rayleigh_nocsi": "Rayleigh, no CSI"}
 CHANNEL_ORDER = ("awgn", "rayleigh", "rayleigh_nocsi")
-INK, INK2, MUTED, GRID = "#0b0b0b", "#52514e", "#8a8984", "#e4e3df"
-CEIL_COLOR = {3: "#52514e", 4: "#a3a29c"}
+
+
+def m3_1_code(prefix, meta):
+    """Name of the M3.1 code: Golay for --blk_parity 10 0 0, Hamming otherwise.
+    P_config.json covers a run that was interrupted before its summary."""
+    parity = meta.get("m3_1", {}).get("parity")
+    if parity is None and os.path.exists(f"{prefix}_config.json"):
+        parity = json.load(open(f"{prefix}_config.json")).get("blk_parity")
+    return "Golay" if parity == [10, 0, 0] else "Hamming"
+
+
+INK, GRID = "black", "#c4c4c4"
+CEILING = {3: {"label": "Ceiling, M1/M3.1/M3.2", "color": INK, "ls": ":"},
+           4: {"label": "Ceiling, M2", "color": "#7f7f7f", "ls": "--"}}
 
 plt.rcParams.update({
-    "font.size": 8, "axes.titlesize": 8, "axes.labelsize": 8, "legend.fontsize": 7,
-    "xtick.labelsize": 7, "ytick.labelsize": 7,
-    "axes.edgecolor": INK2, "axes.labelcolor": INK, "xtick.color": INK2,
-    "ytick.color": INK2, "axes.linewidth": 0.6, "axes.spines.top": False,
-    "axes.spines.right": False, "axes.grid": True, "grid.color": GRID,
-    "grid.linewidth": 0.6, "lines.linewidth": 1.3, "lines.markersize": 3.5,
-    "legend.frameon": False, "pdf.fonttype": 42, "ps.fonttype": 42,
+    "font.family": "serif", "font.serif": ["STIXGeneral"], "mathtext.fontset": "stix",
+    "font.size": 9.2, "axes.labelsize": 9.2, "legend.fontsize": 8.05,
+    "xtick.labelsize": 8.05, "ytick.labelsize": 8.05,
+    "axes.edgecolor": INK, "axes.labelcolor": INK, "xtick.color": INK,
+    "ytick.color": INK, "axes.linewidth": 1.0, "axes.axisbelow": True,
+    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.5, "grid.linestyle": ":",
+    "lines.linewidth": 1.5, "lines.markersize": 4.5,
+    "legend.frameon": True, "legend.fancybox": False, "legend.framealpha": 1.0,
+    "legend.edgecolor": INK, "patch.linewidth": 0.8,
+    "pdf.fonttype": 42, "ps.fonttype": 42,
     "savefig.bbox": "tight", "savefig.pad_inches": 0.02,
 })
 
@@ -104,12 +120,10 @@ class Results:
                 s = r["scenario"]
                 self.scen[s] = (r["channel"], _num(r["mismatch_db"]))
                 snr = _num(r["snr"])
-                for k in list(METRICS) + ["ml_acc"]:
+                for k in METRICS:
                     v = _num(r.get(k))
                     if k == "pesq" and not math.isfinite(v) and pesq_fail is not None:
                         v = pesq_fail
-                    if k == "ml_acc" and not math.isfinite(v):
-                        continue
                     acc.setdefault((s, r["method"], snr, k), {}) \
                        .setdefault(r["file"], []).append(v)
         self.val = {key: {f: float(np.mean(v)) for f, v in d.items()}
@@ -131,6 +145,7 @@ class Results:
         self.meta = {}
         if os.path.exists(f"{prefix}_summary.json"):
             self.meta = json.load(open(f"{prefix}_summary.json")).get("_meta", {})
+        self.m3_1_code = m3_1_code(prefix, self.meta)
 
     def scenarios(self):
         def key(s):
@@ -176,20 +191,22 @@ class Results:
 # =========================================================
 # DRAWING
 # =========================================================
-def _line(ax, x, y, method, ls="-", band=None, label=None, lw=None, marker=True):
+def _line(ax, x, y, method, ls=None, label=None, lw=None):
     st = STYLE[method]
     ok = np.isfinite(y)
-    if band is not None:
-        lo, hi = band
-        okb = ok & np.isfinite(lo) & np.isfinite(hi)
-        ax.fill_between(x[okb], lo[okb], hi[okb], color=st["color"], alpha=0.16, lw=0)
-    ax.plot(x[ok], y[ok], color=st["color"], ls=ls, lw=lw or plt.rcParams["lines.linewidth"],
-            marker=st["marker"] if marker else None, label=label,
-            markeredgecolor="white", markeredgewidth=0.5)
+    ax.plot(x[ok], y[ok], color=st["color"], ls=ls or st["ls"],
+            lw=lw or plt.rcParams["lines.linewidth"], marker=st["marker"], label=label)
 
 
-def _xaxis(ax, snrs, channel):
-    ax.set_xlabel("Average $E_s/N_0$ (dB)" if channel != "awgn" else "$E_s/N_0$ (dB)")
+def _ceilings(ax, R, metric):
+    for q, st in CEILING.items():
+        if (q, metric) in R.ceil:
+            ax.axhline(R.ceil[(q, metric)], lw=1.1, **st)
+
+
+def _xaxis(ax, snrs, channel, name=False):
+    label = "Average $E_s/N_0$ (dB)" if channel != "awgn" else "$E_s/N_0$ (dB)"
+    ax.set_xlabel(f"{label}, {CHANNEL_NAME.get(channel, channel)}" if name else label)
     step = 1 if len(snrs) <= 8 else 2
     ticks = [s for s in snrs if float(s).is_integer() and int(s) % step == 0] or snrs
     ax.set_xticks(ticks)
@@ -204,6 +221,12 @@ def _metric_limits(ax, metric):
         ax.set_ylim(bottom=1.0)
 
 
+def _top_legend(fig, ax, ncol=3):
+    """Boxed legend above the panels: curves fill them, so inside it hides data."""
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=ncol)
+
+
 def _save(fig, out_dir, name, fmts):
     for fmt in fmts:
         fig.savefig(os.path.join(out_dir, f"{name}.{fmt}"), dpi=200)
@@ -211,34 +234,19 @@ def _save(fig, out_dir, name, fmts):
     return name
 
 
-def fig_scenario(R, scen, methods, out_dir, fmts, show_ml=True):
-    ch, mis = R.scen[scen]
+def fig_scenario(R, scen, methods, out_dir, fmts):
+    ch, _ = R.scen[scen]
     fig, axes = plt.subplots(2, 2, figsize=(7.16, 4.9))
     for ax, metric in zip(axes.ravel(), ("pesq", "estoi", "sisdr", "code_acc")):
         for m in methods:
-            x, (y, lo, hi) = R.curve(scen, m, metric)
-            _line(ax, x, y, m, band=(lo, hi), label=STYLE[m]["label"])
-        if metric == "code_acc" and show_ml and "M3.1" in methods:
-            x, (y, _, _) = R.curve(scen, "M3.1", "ml_acc")
-            if np.isfinite(y).any():
-                _line(ax, x, y, "M3.1", ls=(0, (4, 2)), lw=0.9, marker=False,
-                      label="Hamming, no prior (ML)")
-        for q in (3, 4):
-            if (q, metric) in R.ceil:
-                ax.axhline(R.ceil[(q, metric)], color=CEIL_COLOR[q], ls=":", lw=1.0,
-                           label=f"Ceiling, $n_q={q}$")
+            x, (y, _, _) = R.curve(scen, m, metric)
+            _line(ax, x, y, m, label=STYLE[m]["label"])
+        _ceilings(ax, R, metric)
         ax.set_ylabel(METRICS[metric])
         _metric_limits(ax, metric)
         _xaxis(ax, R.snrs, ch)
-    handles, labels = [], []
-    for ax in axes.ravel():
-        for h, l in zip(*ax.get_legend_handles_labels()):
-            if l not in labels:
-                handles.append(h); labels.append(l)
-    fig.tight_layout(h_pad=1.2, w_pad=1.5, rect=(0, 0, 1, 0.87))
-    fig.legend(handles, labels, loc="lower center", ncol=4, bbox_to_anchor=(0.5, 0.875))
-    fig.text(0.5, 0.995, f"{CHANNEL_NAME.get(ch, ch)}, {mismatch_label(mis)}",
-             ha="center", va="top", fontsize=9, color=INK)
+    fig.tight_layout(h_pad=1.2, w_pad=1.5)
+    _top_legend(fig, axes[1, 0])                        # SI-SDR has both ceilings
     return _save(fig, out_dir, f"fig_{scen}", fmts)
 
 
@@ -252,14 +260,15 @@ def _mismatches(R, ch):
     return ms
 
 
-def _legends(fig, methods, mismatches, n_panels):
+def _legends(fig, methods, mismatches, n_panels, extra=()):
+    """Figure legends for plots whose line style shows the SNR mismatch."""
     mh = [Line2D([], [], color=STYLE[m]["color"], marker=STYLE[m]["marker"],
-                 markeredgecolor="white", label=STYLE[m]["label"]) for m in methods]
-    sh = [Line2D([], [], color=INK2, ls=mismatch_style(m), label=mismatch_label(m))
-          for m in mismatches]
+                 label=STYLE[m]["label"]) for m in methods]
+    sh = [Line2D([], [], color=INK, ls=mismatch_style(m), label=mismatch_label(m))
+          for m in mismatches] + list(extra)
     narrow = n_panels == 1
     two = len(sh) > 1
-    y_methods = (1.0 + (0.16 if narrow else 0.07)) if two else 1.0
+    y_methods = (1.0 + (0.16 if narrow else 0.09)) if two else 1.0
     l1 = fig.legend(handles=mh, loc="lower center", bbox_to_anchor=(0.5, y_methods),
                     ncol=2 if narrow else len(mh))
     fig.add_artist(l1)
@@ -273,25 +282,25 @@ def fig_overview(R, metric, methods, out_dir, fmts):
     fig, axes = plt.subplots(1, len(chans), figsize=(3.5 * len(chans) + 0.2, 2.9),
                              sharey=True, squeeze=False)
     all_mis = []
+    for ch in chans:
+        all_mis += [m for m in _mismatches(R, ch) if m not in all_mis]
+    single = len(all_mis) == 1
     for ax, ch in zip(axes[0], chans):
-        mis = _mismatches(R, ch)
-        all_mis += [m for m in mis if m not in all_mis]
         for m in methods:
-            for mm in mis:
-                scen = R.find(ch, mm)
-                x, (y, lo, hi) = R.curve(scen, m, metric)
-                _line(ax, x, y, m, ls=mismatch_style(mm),
-                      band=(lo, hi) if mm == 0 else None, lw=1.3 if mm == 0 else 1.0)
-        for q in (3, 4):
-            if (q, metric) in R.ceil:
-                ax.axhline(R.ceil[(q, metric)], color=CEIL_COLOR[q], ls=":", lw=0.9)
-        ax.set_title(CHANNEL_NAME.get(ch, ch), color=INK)
+            for mm in _mismatches(R, ch):
+                x, (y, _, _) = R.curve(R.find(ch, mm), m, metric)
+                _line(ax, x, y, m, ls=None if single else mismatch_style(mm),
+                      lw=1.5 if mm == 0 else 1.0, label=STYLE[m]["label"] if single else None)
+        _ceilings(ax, R, metric)
         _metric_limits(ax, metric)
-        _xaxis(ax, R.snrs, ch)
+        _xaxis(ax, R.snrs, ch, name=True)
     axes[0, 0].set_ylabel(METRICS[metric])
     fig.tight_layout(w_pad=1.5)
-    _legends(fig, methods, sorted(all_mis, key=lambda m: (m != 0, -m if m > 0 else 100 - m)),
-             len(chans))
+    if single:
+        _top_legend(fig, axes[0, -1], ncol=3 if len(chans) > 1 else 2)
+    else:
+        _legends(fig, methods, sorted(all_mis, key=lambda m: (m != 0, -m if m > 0 else 100 - m)),
+                 len(chans), extra=axes[0, 0].get_legend_handles_labels()[0])
     return _save(fig, out_dir, f"overview_{metric}", fmts)
 
 
@@ -309,11 +318,10 @@ def fig_mismatch_delta(R, metric, methods, out_dir, fmts):
                 continue
             all_mis.append(mm) if mm not in all_mis else None
             for m in methods:
-                x, (y, lo, hi) = R.delta(R.find(ch, mm), ref, m, metric)
-                _line(ax, x, y, m, ls=mismatch_style(mm), band=(lo, hi), lw=1.1)
-        ax.axhline(0.0, color=INK2, lw=0.7)
-        ax.set_title(CHANNEL_NAME.get(ch, ch), color=INK)
-        _xaxis(ax, R.snrs, ch)
+                x, (y, _, _) = R.delta(R.find(ch, mm), ref, m, metric)
+                _line(ax, x, y, m, ls=mismatch_style(mm), lw=1.2)
+        ax.axhline(0.0, color=INK, lw=0.8)
+        _xaxis(ax, R.snrs, ch, name=True)
     axes[0, 0].set_ylabel(f"$\\Delta$ {METRICS[metric]}, mismatched $-$ perfect")
     fig.tight_layout(w_pad=1.5)
     _legends(fig, methods, sorted(all_mis, key=lambda m: -m), len(chans))
@@ -329,14 +337,13 @@ def fig_fading_penalty(R, metric, methods, out_dir, fmts):
                              sharey=True, squeeze=False)
     for ax, ch in zip(axes[0], chans):
         for m in methods:
-            x, (y, lo, hi) = R.delta(R.find(ch, 0.0), ref, m, metric)
-            _line(ax, x, y, m, band=(lo, hi))
-        ax.axhline(0.0, color=INK2, lw=0.7)
-        ax.set_title(f"{CHANNEL_NAME.get(ch, ch)} $-$ AWGN", color=INK)
-        _xaxis(ax, R.snrs, ch)
-    axes[0, 0].set_ylabel(f"$\\Delta$ {METRICS[metric]}")
+            x, (y, _, _) = R.delta(R.find(ch, 0.0), ref, m, metric)
+            _line(ax, x, y, m, label=STYLE[m]["label"])
+        ax.axhline(0.0, color=INK, lw=0.8)
+        _xaxis(ax, R.snrs, ch, name=True)
+    axes[0, 0].set_ylabel(f"$\\Delta$ {METRICS[metric]}, fading $-$ AWGN")
     fig.tight_layout(w_pad=1.5)
-    _legends(fig, methods, [0.0], len(chans))
+    _top_legend(fig, axes[0, -1], ncol=2)
     return _save(fig, out_dir, f"fading_penalty_{metric}", fmts)
 
 
@@ -375,17 +382,15 @@ def main():
     ap.add_argument("--summary_metrics", nargs="+", default=["estoi", "pesq"],
                     choices=list(METRICS))
     ap.add_argument("--table_snrs", type=float, nargs="+", default=[-5, -3, 0, 2, 5, 8])
-    ap.add_argument("--no_ml", action="store_true",
-                    help="hide the prior-free (ML) accuracy of the M3.1 block codes")
     args = ap.parse_args()
 
     pesq_fail = None if args.pesq_fail.lower() == "nan" else float(args.pesq_fail)
     R = Results(args.prefix, pesq_fail, args.ci)
+    STYLE["M3.1"]["label"] = f"{R.m3_1_code} + SBSD (M3.1)"
     methods = [m for m in args.methods if m in R.methods]
     os.makedirs(args.out_dir, exist_ok=True)
 
-    made = [fig_scenario(R, s, methods, args.out_dir, args.fmt, show_ml=not args.no_ml)
-            for s in R.scenarios()]
+    made = [fig_scenario(R, s, methods, args.out_dir, args.fmt) for s in R.scenarios()]
     for metric in args.summary_metrics:
         made.append(fig_overview(R, metric, methods, args.out_dir, args.fmt))
         made.append(fig_mismatch_delta(R, metric, methods, args.out_dir, args.fmt))
