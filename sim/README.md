@@ -1,4 +1,4 @@
-# DeepJSCC: channel-robust neural speech coding at 3 kbps
+# DeepJSCC: Simulation Codes
 
 Simulation code for a learned channel-protection scheme built on the
 [EnCodec](https://github.com/facebookresearch/encodec) 24 kHz neural codec. The
