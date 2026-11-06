@@ -11,7 +11,7 @@
 [![Audio demo](https://img.shields.io/badge/Audio_demo-listen-brightgreen.svg)](https://hisar-research.github.io/usrp-digital-jscc-audio/)
 
 [**🎧 Audio demo**](https://hisar-research.github.io/usrp-digital-jscc-audio/) ·
-[Simulation](deploy_soft/README.md) ·
+[Simulation](sim/README.md) ·
 [OTA testbed](ota/README.md) ·
 [Environment setup](#environment-setup) ·
 [Citation](#citation)
