@@ -70,53 +70,6 @@ Error-free EnCodec ceilings over the same clips:
 | n_q = 3 (M1, M3.1, M3.2) | 2.25 kbps | 0.785 | 2.04 |
 | n_q = 4 (M2) | 3.0 kbps | 0.819 | 2.34 |
 
-**Hamming + SBSD on the same clips.** These values use `--blk_parity 4 3 3` and
-come from an earlier sweep with the same noise. Its M1 and M2 rows match the run
-above, except on Rayleigh for `original_audio_35.wav`, whose fading draw changed;
-that moved the mean ESTOI of M1 and M2 by at most 0.0004. This sweep has
-narrowband PESQ only, so the PESQ columns here cannot be compared with the
-wideband table above.
-
-| Es/N0 (dB) | AWGN ESTOI | Rayleigh ESTOI | AWGN PESQ (NB) | Rayleigh PESQ (NB) |
-|---:|---:|---:|---:|---:|
-| -5 | 0.306 | 0.269 | 1.17 | 1.13 |
-| -3 | 0.458 | 0.373 | 1.31 | 1.18 |
-| 0 | 0.676 | 0.523 | 1.85 | 1.35 |
-| +2 | 0.758 | 0.602 | 2.34 | 1.52 |
-| +5 | 0.785 | 0.686 | 2.58 | 1.83 |
-| +8 | 0.785 | 0.735 | 2.59 | 2.13 |
-
-What the tables show:
-
-- **Low SNR:** M1 has the best ESTOI and PESQ at -5 and -3 dB on both channels.
-  The PESQ gap to Golay + SBSD is small here, because both are close to the
-  bottom of the scale.
-- **AWGN:** M1 has the highest ESTOI up to +1 dB. M3.2 reaches the n_q = 3 ceiling
-  at +2 dB, at the cost of about 1 s of latency. M1 stays ahead of Golay + SBSD up
-  to +7 dB, and the two are level at +8 dB.
-- **Rayleigh:** M1 has the highest ESTOI from -5 to +5 dB and stays ahead of
-  Golay + SBSD at every SNR. M3.2 overtakes M1 at +6 dB and is best at +8 dB. The
-  receiver was trained on AWGN only, so Rayleigh is a test on a channel it did not
-  see in training.
-- **High SNR:** M2 overtakes the other methods on AWGN from +7 dB because it
-  carries a fourth RVQ layer.
-- **SI-SDR:** M1 does not lead on this metric. Golay + SBSD has the higher SI-SDR
-  at every Rayleigh SNR and on AWGN up to +1 dB, for example -9.8 dB against
-  -14.2 dB at -5 dB on AWGN.
-- **Golay against Hamming:** Golay + SBSD has the higher ESTOI at low SNR and
-  Hamming + SBSD at high SNR. On AWGN they cross between -2 and -1 dB, and on
-  Rayleigh between 0 and +1 dB.
-- **The comparison with M1 depends on the code:** Hamming + SBSD beats M1 on AWGN
-  ESTOI from 0 to +7 dB, while Golay + SBSD does not beat it at any SNR.
-- **Codeword accuracy is not the same as speech quality:** Golay + SBSD has lower
-  codeword accuracy than Hamming + SBSD at all six tabulated SNRs on both
-  channels, yet higher ESTOI at -5 and -3 dB. All of its parity protects layer 1.
-- **SNR mismatch:** this run used perfect SNR knowledge only, so there are no
-  mismatch results for Golay + SBSD yet. M2 is unaffected by construction, and
-  M3.2 is unaffected in practice. In the earlier Hamming sweep, at -5 dB on AWGN,
-  M1 fell from 0.430 to 0.394 (+3 dB) or 0.412 (-3 dB), while Hamming + SBSD fell
-  from 0.306 to 0.263 or 0.226.
-
 ## Repository contents
 
 | Path | Purpose |
