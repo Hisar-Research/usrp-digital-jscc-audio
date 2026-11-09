@@ -21,39 +21,30 @@ from encodec import EncodecModel
 
 
 # ============================================================
-# SOFT VOGEO PACKAGE
+# SHARED CODE FROM sim/
+#
+# The proposed method (M1) uses the simulation's receiver and trained bundle,
+# and M3.1 uses the simulation's Golay code and Markov index prior, so OTA and
+# simulation run the same methods.
 # ============================================================
 
-# Exact paths on your machine.
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))        # ota/
+REPO_DIR = os.path.dirname(PROJECT_DIR)
+SIM_DIR = os.path.join(REPO_DIR, "sim")
+SBSD_PRIOR = os.path.join(SIM_DIR, "sbsd_prior_nq3.npz")
 
-# reference_soft is inside the project directory
-SOFT_REF_DIR = os.path.join(PROJECT_DIR, "reference_soft")
+for name in ("vogeo_rx.py", "vogeo_frame.py", "sbsd_prior_nq3.npz",
+             os.path.join("bundle", "manifest.json"),
+             os.path.join("bundle", "codebooks.npy")):
+    if not os.path.isfile(os.path.join(SIM_DIR, name)):
+        raise RuntimeError(f"Missing {os.path.join(SIM_DIR, name)}")
 
-# The Python reference files are expected here.
-required_py = (
-    "vogeo_rx.py",
-    "vogeo_llr.py",
-    "vogeo_frame.py",
-)
+for path in (SIM_DIR, PROJECT_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-missing_py = [
-    name for name in required_py
-    if not os.path.isfile(os.path.join(SOFT_REF_DIR, name))
-]
-
-if missing_py:
-    raise RuntimeError(
-        f"SOFT reference path is {SOFT_REF_DIR}, but these files are missing: "
-        + ", ".join(missing_py)
-    )
-
-# Import reference_soft as a package because vogeo_rx.py uses relative imports
-# such as "from .vogeo_frame import ...".
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
-from reference_soft.vogeo_rx import VogeoRx
+from vogeo_rx import VogeoRx
+from golay_sbsd import GolaySBSD, BITS_PER_FRAME as GOLAY_BITS_PER_FRAME
 
 
 # ============================================================
@@ -113,8 +104,8 @@ parser.add_argument(
     type=float,
     default=50.0,
     help=(
-        "Symmetric clipping magnitude for hardware-estimated VOGEO LLRs. "
-        "Default: 50"
+        "Symmetric clipping magnitude for the hardware-estimated LLRs given to "
+        "the VOGEO and Golay + SBSD decoders. Default: 50"
     ),
 )
 args = parser.parse_args()
@@ -125,10 +116,10 @@ if VOGEO_LLR_CLIP <= 0.0:
 
 # TX_GAIN_DB is an experimental control/label only. Never convert it to gamma.
 
-# Internal method keys; CSV labels are proposed, conv, ldpc, 3.
+# Internal method keys; CSV labels are proposed, golay, ldpc, 3.
 METHODS = (
     "vogeo",
-    "conv",
+    "golay",
     "ldpc",
     "plain",
 )
@@ -136,8 +127,8 @@ METHODS = (
 DISPLAY_NAMES = {
     "vogeo":
         "PROPOSED SOFT VOGEO",
-    "conv":
-        "EnCodec 2.25 kbps + Conv(3/4) SOFT Viterbi",
+    "golay":
+        "EnCodec 2.25 kbps + Golay(20,10) on layer 1, SBSD",
     "ldpc":
         "EnCodec 2.25 kbps + LDPC(3/4) SOFT normalized min-sum",
     "plain":
@@ -147,7 +138,7 @@ DISPLAY_NAMES = {
 # Exact labels written in the CSV "method" column.
 CSV_METHOD_NAMES = {
     "vogeo": "proposed",
-    "conv": "conv",
+    "golay": "golay",
     "ldpc": "ldpc",
     "plain": "3",
 }
@@ -157,178 +148,28 @@ CSV_METHOD_NAMES = {
 # ENCODEC + SOFT VOGEO
 # ============================================================
 
-# Locate the trained SOFT VOGEO bundle.
-# Do NOT simply take the first directory named "bundle": your project contains
-# both hard and soft bundles. We inspect JSON manifest files and only accept
-# a bundle whose manifest declares decision_mode == "soft".
+# The OTA model is the simulation bundle in sim/bundle/: soft, 3 RVQ layers
+# and 10 parity bits.
 
-def _bundle_decision_mode(bundle_dir):
-    """
-    Return (mode, manifest_path).
-
-    Searches JSON files directly inside the bundle and one level below.
-    The VOGEO package records decision_mode in its manifest.
-    """
-    json_candidates = []
-
-    try:
-        for root, dirs, files in os.walk(bundle_dir):
-            rel = os.path.relpath(root, bundle_dir)
-
-            # Keep this bounded; manifests should be at/near the bundle root.
-            depth = 0 if rel == "." else rel.count(os.sep) + 1
-            if depth > 1:
-                dirs[:] = []
-                continue
-
-            for name in files:
-                if name.lower().endswith(".json"):
-                    json_candidates.append(os.path.join(root, name))
-    except OSError:
-        return None, None
-
-    # Prefer files that look like manifests.
-    json_candidates.sort(
-        key=lambda p: (
-            0 if "manifest" in os.path.basename(p).lower() else 1,
-            p,
-        )
-    )
-
-    for path in json_candidates:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                obj = json.load(f)
-        except Exception:
-            continue
-
-        if isinstance(obj, dict) and "decision_mode" in obj:
-            return str(obj.get("decision_mode")).lower(), path
-
-    return None, None
-
-
-def _read_manifest(bundle_dir):
-    manifest_path = os.path.join(bundle_dir, "manifest.json")
-    if not os.path.isfile(manifest_path):
-        return None
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-    except Exception:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
-def _find_30plus10_soft_bundle():
-    """Find the same compatible 3-codebook + 10-parity SOFT VOGEO bundle as TX."""
-    preferred_roots = [
-        os.path.join(SOFT_REF_DIR, "bundle_3_4"),
-        os.path.join(SOFT_REF_DIR, "bundle_3_out_4"),
-        os.path.join(SOFT_REF_DIR, "bundle_30_10"),
-    ]
-
-    candidates = []
-    seen = set()
-
-    def add_manifest_dir(path):
-        path = os.path.abspath(path)
-        if path in seen:
-            return
-        seen.add(path)
-
-        manifest = _read_manifest(path)
-        if manifest is None:
-            return
-
-        mode = manifest.get("decision_mode")
-        if mode is not None and str(mode).lower() != "soft":
-            return
-
-        def as_int(*names):
-            for name in names:
-                if name in manifest:
-                    try:
-                        return int(manifest[name])
-                    except Exception:
-                        pass
-            return None
-
-        def as_float(*names):
-            for name in names:
-                if name in manifest:
-                    try:
-                        return float(manifest[name])
-                    except Exception:
-                        pass
-            return None
-
-        n_q = as_int("n_q", "num_codebooks", "num_quantizers")
-        parity = as_int("parity_dim", "parity_bits", "parity_bits_per_frame")
-        bw = as_float("bandwidth", "bandwidth_kbps", "encodec_bandwidth")
-
-        if n_q is not None and n_q != 3:
-            return
-        if parity is not None and parity != 10:
-            return
-
-        score = 0
-        lower = path.lower()
-        if "bundle_3_4" in lower:
-            score += 100
-        if "bundle_3_out_4" in lower:
-            score += 95
-        if "bundle_30_10" in lower:
-            score += 90
-        if n_q == 3:
-            score += 20
-        if parity == 10:
-            score += 20
-        if bw is not None and abs(bw - 2.25) < 1e-3:
-            score += 10
-        if mode is not None and str(mode).lower() == "soft":
-            score += 10
-
-        candidates.append((score, path))
-
-    for root in preferred_roots:
-        if not os.path.isdir(root):
-            continue
-        if os.path.isfile(os.path.join(root, "manifest.json")):
-            add_manifest_dir(root)
-        for walk_root, _dirs, files in os.walk(root):
-            if "manifest.json" in files:
-                add_manifest_dir(walk_root)
-
-    if not candidates and os.path.isdir(SOFT_REF_DIR):
-        for walk_root, _dirs, files in os.walk(SOFT_REF_DIR):
-            if "manifest.json" in files:
-                add_manifest_dir(walk_root)
-
-    if not candidates:
+def _check_soft_bundle(bundle_dir):
+    with open(os.path.join(bundle_dir, "manifest.json"), "r", encoding="utf-8") as f:
+        m = json.load(f)
+    if (str(m.get("decision_mode")).lower() != "soft"
+            or int(m.get("n_q", -1)) != 3 or int(m.get("parity_dim", -1)) != 10):
         raise RuntimeError(
-            "Could not find a compatible 30+10 SOFT VOGEO bundle under:\n"
-            f"  {SOFT_REF_DIR}\n"
-            "Expected a directory containing manifest.json with soft mode, "
-            "3 codebooks, and 10 parity bits."
+            f"{bundle_dir} is not a soft n_q=3, parity_dim=10 bundle: "
+            f"decision_mode={m.get('decision_mode')}, n_q={m.get('n_q')}, "
+            f"parity_dim={m.get('parity_dim')}"
         )
-
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][1]
+    return bundle_dir
 
 
-VOGEO_BUNDLE_DIR = _find_30plus10_soft_bundle()
+VOGEO_BUNDLE_DIR = _check_soft_bundle(os.path.join(SIM_DIR, "bundle"))
 BUNDLE_NAME = os.path.basename(VOGEO_BUNDLE_DIR)
 
-mode, manifest = _bundle_decision_mode(VOGEO_BUNDLE_DIR)
-if mode is not None and mode != "soft":
-    raise RuntimeError(
-        f"Bundle decision_mode={mode!r}; expected 'soft'. "
-        f"manifest={manifest}"
-    )
-
-print(f"[RX] SOFT reference code = {SOFT_REF_DIR}")
+print(f"[RX] Simulation code     = {SIM_DIR}")
 print(f"[RX] VOGEO bundle        = {VOGEO_BUNDLE_DIR}")
+print(f"[RX] SBSD prior          = {SBSD_PRIOR}")
 
 DEVICE = "cpu"
 
@@ -400,120 +241,30 @@ PLAIN_PAD_BITS = (
 
 
 # ============================================================
-# RATE-3/4 PUNCTURED CONVOLUTIONAL DECODER
+# GOLAY + SBSD (M3.1), as in sim/selftest_sim_v3.py --blk_parity 10 0 0
 #
-# Mother code: K=7, rate 1/2, generators (133,171) octal.
-# Puncture pattern [1,1,1,0,0,1] keeps 4 of every 6 mother bits,
-# giving effective rate 3/4. The encoder remains terminated by 6 zeros.
-#
-# 2250 source bits + 6 tail = 2256 trellis inputs
-# -> 4512 mother bits -> 3008 punctured transmitted bits = 376 B.
+# Per EnCodec frame, 40 bits, frame-major, MSB first:
+#   [layer 1: 10 index bits + 10 Golay parity bits | layer 2: 10 | layer 3: 10]
+# 75 frames * 40 bits = 3000 bits, then 8 fill bits that keep the segment at
+# 376 B (the super-packet stays 1502 B). The fill bits are ignored.
 # ============================================================
 
-K = 7
-N_STATES = 1 << (K - 1)
-G_POLY = (0o133, 0o171)
-TAIL_BITS = K - 1
+golay = GolaySBSD(SBSD_PRIOR)
 
-PUNCTURE_PATTERN = np.array(
-    [1, 1, 1, 0, 0, 1],
-    dtype=np.uint8,
-)
-
-CONV_INFO_BITS = (
+PROTECTED_INFO_BITS = (
     PROTECTED_N_Q
     * FRAMES_PER_CHUNK
     * BITS_PER_CODE
 )                                                   # 2250
 
-CONV_TRELLIS_INPUT_BITS = (
-    CONV_INFO_BITS
-    + TAIL_BITS
-)                                                   # 2256
+GOLAY_USEFUL_BITS = (
+    FRAMES_PER_CHUNK
+    * GOLAY_BITS_PER_FRAME
+)                                                   # 3000
 
-CONV_MOTHER_BITS = (
-    2
-    * CONV_TRELLIS_INPUT_BITS
-)                                                   # 4512
-
-if CONV_MOTHER_BITS % PUNCTURE_PATTERN.size != 0:
-    raise RuntimeError(
-        "Mother-code length is not aligned to the puncture period"
-    )
-
-CONV_PUNCTURE_MASK = np.tile(
-    PUNCTURE_PATTERN.astype(bool),
-    CONV_MOTHER_BITS // PUNCTURE_PATTERN.size,
-)
-
-CONV_USEFUL_BITS = int(CONV_PUNCTURE_MASK.sum())    # 3008
-
-CONV_BYTES = math.ceil(
-    CONV_USEFUL_BITS / 8
-)                                                   # 376
-
-CONV_PHYSICAL_BITS = (
-    CONV_BYTES * 8
-)                                                   # 3008
-
-CONV_PAD_BITS = (
-    CONV_PHYSICAL_BITS
-    - CONV_USEFUL_BITS
-)                                                   # 0
-
-
-def _parity(x):
-    x ^= x >> 8
-    x ^= x >> 4
-    x ^= x >> 2
-    x ^= x >> 1
-    return x & 1
-
-
-def _build_trellis():
-    nxt = np.zeros(
-        (N_STATES, 2),
-        dtype=np.int64,
-    )
-
-    out = np.zeros(
-        (N_STATES, 2, 2),
-        dtype=np.uint8,
-    )
-
-    for state in range(
-        N_STATES
-    ):
-        for bit in (0, 1):
-            reg = (
-                (bit << (K - 1))
-                | state
-            )
-
-            for j, g in enumerate(
-                G_POLY
-            ):
-                out[
-                    state,
-                    bit,
-                    j,
-                ] = _parity(
-                    reg & g
-                )
-
-            nxt[
-                state,
-                bit,
-            ] = (
-                reg >> 1
-            )
-
-    return nxt, out
-
-
-NEXT_STATE, OUT_BITS = (
-    _build_trellis()
-)
+GOLAY_FILL_BITS = 8
+GOLAY_PHYSICAL_BITS = GOLAY_USEFUL_BITS + GOLAY_FILL_BITS   # 3008
+GOLAY_BYTES = GOLAY_PHYSICAL_BITS // 8                      # 376
 
 
 # ============================================================
@@ -531,10 +282,10 @@ NEXT_STATE, OUT_BITS = (
 # are kept as real-valued reliabilities; they are NOT hard-sliced first.
 # ============================================================
 
-LDPC_SOURCE_BITS = CONV_INFO_BITS
-LDPC_ZERO_PAD_BITS = TAIL_BITS
+LDPC_SOURCE_BITS = PROTECTED_INFO_BITS               # 2250
+LDPC_ZERO_PAD_BITS = 6
 LDPC_K = LDPC_SOURCE_BITS + LDPC_ZERO_PAD_BITS       # 2256
-LDPC_N = CONV_PHYSICAL_BITS                          # 3008
+LDPC_N = LDPC_K * 4 // 3                             # 3008
 LDPC_M = LDPC_N - LDPC_K                             # 752
 LDPC_RATE = LDPC_K / LDPC_N                          # 0.75
 LDPC_INFO_DEGREE = 3
@@ -619,10 +370,10 @@ LDPC_USEFUL_BITS = LDPC_N
 LDPC_BYTES = math.ceil(LDPC_USEFUL_BITS / 8)
 LDPC_PHYSICAL_BITS = LDPC_BYTES * 8
 
-if LDPC_PHYSICAL_BITS != CONV_PHYSICAL_BITS:
+if LDPC_PHYSICAL_BITS != GOLAY_PHYSICAL_BITS:
     raise RuntimeError(
         f"LDPC physical bits={LDPC_PHYSICAL_BITS}, "
-        f"Conv={CONV_PHYSICAL_BITS}"
+        f"Golay={GOLAY_PHYSICAL_BITS}"
     )
 
 
@@ -677,8 +428,7 @@ def ldpc_decode_soft(soft_physical):
     # for normalized min-sum; relative magnitude preserves reliability.
     channel_llr = -soft.astype(np.float64, copy=True)
 
-    # Six padding bits are known zeros at both TX and RX, analogous to the
-    # known termination used by the convolutional baseline.
+    # Six padding bits are known zeros at both TX and RX.
     pad_start = LDPC_SOURCE_BITS
     pad_end = LDPC_K
     channel_llr[pad_start:pad_end] = np.maximum(
@@ -808,17 +558,17 @@ VOGEO_PAD_BITS = (
 # ============================================================
 
 ORDERS = (
-    ("plain", "conv", "ldpc", "vogeo"),
-    ("conv", "ldpc", "vogeo", "plain"),
-    ("ldpc", "vogeo", "plain", "conv"),
-    ("vogeo", "plain", "conv", "ldpc"),
+    ("plain", "golay", "ldpc", "vogeo"),
+    ("golay", "ldpc", "vogeo", "plain"),
+    ("ldpc", "vogeo", "plain", "golay"),
+    ("vogeo", "plain", "golay", "ldpc"),
 )
 
 SEGMENT_PHYSICAL_BITS = {
     "plain":
         PLAIN_PHYSICAL_BITS,
-    "conv":
-        CONV_PHYSICAL_BITS,
+    "golay":
+        GOLAY_PHYSICAL_BITS,
     "ldpc":
         LDPC_PHYSICAL_BITS,
     "vogeo":
@@ -827,7 +577,7 @@ SEGMENT_PHYSICAL_BITS = {
 
 SUPER_PACKET_BYTES = (
     PLAIN_BYTES
-    + CONV_BYTES
+    + GOLAY_BYTES
     + LDPC_BYTES
     + VOGEO_BYTES
 )                                                   # 1502
@@ -837,7 +587,7 @@ SUPER_PACKET_BITS = (
 )                                                   # 12016
 
 # GNU Radio can KEEP sending one float32 soft metric/bit.
-# Soft metrics are preserved for Conv and VOGEO; Plain uses a sign decision.
+# Soft metrics are used by Golay + SBSD, LDPC and VOGEO; Plain uses a sign decision.
 SOFT_DTYPE = np.dtype(
     "<f4"
 )
@@ -859,7 +609,9 @@ IQ_SAMPLE_BYTES = RECORDING_SAMPLES * np.dtype("<c8").itemsize
 # ============================================================
 
 MAGIC = b"VQ"
-TYPE_SUPER_SOFT = 5
+# 6 = Golay + SBSD super-packet with frame-major M2 bits. Type 5 was the
+# earlier convolutional layout and is rejected.
+TYPE_SUPER_SOFT = 6
 
 HEADER_FORMAT = "!2sBIHHH"
 
@@ -884,7 +636,8 @@ ORIGINAL_DIR = os.path.abspath(
 # received_audio_superpacket_soft/
 #   audio_gain_12/
 #     proposed/
-#     conv/
+#     golay/
+#     ldpc/
 #     3/
 # ------------------------------------------------------------
 SAVE_ROOT_DIR = os.path.abspath(
@@ -964,6 +717,9 @@ pending_header = None
 
 vogeo_audio_id = None
 vogeo_expected_chunk = 0
+
+golay_audio_id = None
+golay_expected_chunk = 0
 
 
 # ============================================================
@@ -1238,9 +994,10 @@ def decode_plain_hard(
         ]
     )
 
+    # Frame-major, as in the simulation: [75 frames, 4 layers, 10 bits].
     b = bits.reshape(
-        PLAIN_N_Q,
         FRAMES_PER_CHUNK,
+        PLAIN_N_Q,
         BITS_PER_CODE,
     )
 
@@ -1264,7 +1021,7 @@ def decode_plain_hard(
     ).sum(
         axis=2,
         dtype=np.uint16,
-    )
+    ).T
 
     return decode_encodec_codes(
         codes,
@@ -1274,143 +1031,73 @@ def decode_plain_hard(
 
 
 # ============================================================
-# SOFT-DECISION VITERBI
+# GOLAY + SBSD DECODER (M3.1)
 # ============================================================
 
-def viterbi_decode_soft(mother_soft):
+def decode_golay_sbsd(
+    soft_physical,
+    valid_samples,
+    audio_id,
+    chunk_id,
+):
     """
-    Soft Viterbi on the reconstructed rate-1/2 mother-code metrics.
+    Golay + SBSD, as in the simulation (--blk_parity 10 0 0).
 
-    Punctured positions are inserted as 0.0, i.e. neutral reliability,
-    so they contribute no preference to either branch.
+    SBSD weighs the channel against a Markov index prior, so it needs
+    calibrated LLRs. They come from the same blind two-Gaussian EM estimator
+    and clip as the proposed method, fitted on this segment's 3000 payload
+    metrics; the 8 fill bits are ignored.
+
+    The forward filter carries its state from chunk to chunk within one
+    utterance. It restarts from the unigram prior at a new utterance or after
+    a missing chunk, as the VOGEO decoder resets its context.
     """
-    mother_soft = np.asarray(
-        mother_soft,
-        dtype=np.float32,
-    ).reshape(-1)
+    global golay_audio_id
+    global golay_expected_chunk
 
-    if mother_soft.size != CONV_MOTHER_BITS:
+    if soft_physical.size != GOLAY_PHYSICAL_BITS:
         raise ValueError(
-            f"Conv mother soft values={mother_soft.size}, "
-            f"expected {CONV_MOTHER_BITS}"
+            f"Golay physical={soft_physical.size}, "
+            f"expected {GOLAY_PHYSICAL_BITS}"
         )
 
-    rx_soft = mother_soft.reshape(
-        CONV_TRELLIS_INPUT_BITS,
-        2,
-    )
+    if golay_audio_id != audio_id:
+        golay.reset()
+        golay_audio_id = audio_id
+        golay_expected_chunk = 0
 
-    expected_sym = (
-        2.0 * OUT_BITS.astype(np.float32) - 1.0
-    )
-
-    INF = np.float64(1e300)
-    metric = np.full(N_STATES, INF, dtype=np.float64)
-    metric[0] = 0.0
-
-    prev_state = np.zeros(
-        (CONV_TRELLIS_INPUT_BITS, N_STATES),
-        dtype=np.int16,
-    )
-    prev_bit = np.zeros(
-        (CONV_TRELLIS_INPUT_BITS, N_STATES),
-        dtype=np.uint8,
-    )
-
-    for t in range(CONV_TRELLIS_INPUT_BITS):
-        branch = -(
-            expected_sym * rx_soft[t][None, None, :]
-        ).sum(axis=2)
-
-        new_metric = np.full(
-            N_STATES, INF, dtype=np.float64
+    if chunk_id != golay_expected_chunk:
+        print(
+            f"  GOLAY SBSD STATE RESET | "
+            f"expected chunk {golay_expected_chunk + 1}, "
+            f"got {chunk_id + 1}"
         )
+        golay.reset()
 
-        for state in range(N_STATES):
-            if not np.isfinite(metric[state]):
-                continue
-
-            for bit in (0, 1):
-                ns = int(NEXT_STATE[state, bit])
-                candidate = metric[state] + float(
-                    branch[state, bit]
-                )
-
-                if candidate < new_metric[ns]:
-                    new_metric[ns] = candidate
-                    prev_state[t, ns] = state
-                    prev_bit[t, ns] = bit
-
-        m = new_metric.min()
-        if np.isfinite(m):
-            new_metric -= m
-        metric = new_metric
-
-    # Encoder is terminated to state zero.
-    state = 0
-    decoded = np.zeros(
-        CONV_TRELLIS_INPUT_BITS, dtype=np.uint8
+    raw_metric = (
+        soft_physical[:GOLAY_USEFUL_BITS]
+        .astype(np.float32, copy=True)
+        .reshape(FRAMES_PER_CHUNK, GOLAY_BITS_PER_FRAME)
     )
 
-    for t in range(CONV_TRELLIS_INPUT_BITS - 1, -1, -1):
-        decoded[t] = prev_bit[t, state]
-        state = int(prev_state[t, state])
+    llr, llr_stats = estimate_vogeo_llr_from_hardware(raw_metric)
 
-    return decoded[:CONV_INFO_BITS]
-
-
-def depuncture_soft(punctured_soft):
-    punctured_soft = np.asarray(
-        punctured_soft,
-        dtype=np.float32,
-    ).reshape(-1)
-
-    if punctured_soft.size != CONV_USEFUL_BITS:
-        raise ValueError(
-            f"Punctured soft values={punctured_soft.size}, "
-            f"expected {CONV_USEFUL_BITS}"
-        )
-
-    mother_soft = np.zeros(
-        CONV_MOTHER_BITS,
-        dtype=np.float32,
+    print(
+        "  GOLAY SOFT EM | "
+        f"sep/sigma={llr_stats['separation_over_sigma']:.3g} | "
+        f"LLR|x|50={llr_stats['median_abs_llr']:.4g}"
     )
-    mother_soft[CONV_PUNCTURE_MASK] = punctured_soft
-    return mother_soft
 
+    codes = golay.decode(llr)
 
-def decode_conv_soft(soft_physical, valid_samples):
-    if soft_physical.size != CONV_PHYSICAL_BITS:
-        raise ValueError(
-            f"Conv physical={soft_physical.size}, "
-            f"expected {CONV_PHYSICAL_BITS}"
-        )
-
-    punctured_soft = soft_physical[:CONV_USEFUL_BITS]
-    mother_soft = depuncture_soft(punctured_soft)
-    info_bits = viterbi_decode_soft(mother_soft)
-
-    bits = info_bits.reshape(
-        FRAMES_PER_CHUNK,
+    audio = decode_encodec_codes(
+        codes,
+        valid_samples,
         PROTECTED_N_Q,
-        BITS_PER_CODE,
     )
 
-    weights = (
-        1 << np.arange(
-            BITS_PER_CODE - 1, -1, -1,
-            dtype=np.uint16,
-        )
-    )
-
-    codes = (
-        bits.astype(np.uint16)
-        * weights[None, None, :]
-    ).sum(axis=2, dtype=np.uint16).T
-
-    return decode_encodec_codes(
-        codes, valid_samples, PROTECTED_N_Q
-    )
+    golay_expected_chunk = chunk_id + 1
+    return audio
 
 
 # ============================================================
@@ -2206,30 +1893,31 @@ def process_super_packet(
             f"{exc}"
         )
 
-    # ---------------- CONV SOFT ----------------
+    # ---------------- GOLAY + SBSD ----------------
     try:
-        audio = decode_conv_soft(
-            parts["conv"],
+        audio = decode_golay_sbsd(
+            parts["golay"],
             valid_samples,
+            audio_id,
+            chunk_id,
         )
 
         state[
             "chunks"
-        ]["conv"][
+        ]["golay"][
             chunk_id
         ] = audio
 
         print(
-            f"  CONV SOFT OK | "
-            f"{CONV_PHYSICAL_BITS} RX metrics "
-            f"-> {CONV_USEFUL_BITS} soft coded metrics "
-            f"-> SOFT Viterbi "
-            f"-> {CONV_INFO_BITS} info bits"
+            f"  GOLAY+SBSD OK | "
+            f"{GOLAY_PHYSICAL_BITS} RX metrics "
+            f"-> {GOLAY_USEFUL_BITS} soft metrics "
+            f"-> blind EM LLR -> SBSD"
         )
 
     except Exception as exc:
         print(
-            f"  CONV SOFT ERROR | "
+            f"  GOLAY+SBSD ERROR | "
             f"{type(exc).__name__}: "
             f"{exc}"
         )
@@ -2367,16 +2055,16 @@ def print_summary():
 # ============================================================
 
 print("============================================================")
-print("FOUR-METHOD TX-GAIN SOFT SUPER-PACKET RX | 30+10 + CONV 3/4 + LDPC 3/4")
+print("FOUR-METHOD TX-GAIN SOFT SUPER-PACKET RX | 30+10 + GOLAY+SBSD + LDPC 3/4")
 print("============================================================")
-print("Soft VOGEO folder       =", SOFT_REF_DIR)
+print("Simulation code folder  =", SIM_DIR)
 print("Soft VOGEO run ID       =", vogeo.run_id)
 print("Header packet type      =", TYPE_SUPER_SOFT)
 print("USRP TX gain             =", TX_GAIN_DB, "dB")
 print()
-print("CSV method labels       = proposed, conv, ldpc, 3")
-print("Plain 3 kbps            = hard BPSK slice, 3000 bits")
-print("Conv 2.25 + rate-3/4    = punctured SOFT Viterbi, 3008 physical bits")
+print("CSV method labels       = proposed, golay, ldpc, 3")
+print("Plain 3 kbps            = hard BPSK slice, 3000 bits, frame-major")
+print("Golay + SBSD 2.25       = EM LLR + Golay(20,10) + SBSD, 3000 bits + 8 fill")
 print("LDPC 2.25 + rate-3/4    = SOFT normalized min-sum, 3008 physical bits")
 print("Proposed                = SOFT VOGEO blind two-Gaussian EM LLR decoder, 3000 bits")
 print()
@@ -2385,7 +2073,7 @@ print("Expected GNU Radio UDP  =", SOFT_SUPER_PACKET_BYTES, "bytes")
 print("PESQ CSV                =", PESQ_CSV)
 print("ESTOI CSV               =", ESTOI_CSV)
 print("Received audio folder   =", SAVE_DIR)
-print("VOGEO EM LLR clip        =", VOGEO_LLR_CLIP)
+print("VOGEO/Golay EM LLR clip  =", VOGEO_LLR_CLIP)
 print("Offline LLR capture      = full-packet two-Gaussian EM, float32; positive=bit1")
 print("============================================================")
 

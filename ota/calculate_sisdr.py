@@ -30,7 +30,7 @@ ORIGINAL_DIR = os.path.join(
 # received_audio_superpacket_soft_gain/
 # ├── audio_gain_27/
 # │   ├── proposed/
-# │   ├── conv/
+# │   ├── golay/      (conv/ in runs before Golay + SBSD)
 # │   ├── ldpc/
 # │   └── 3/
 # ├── audio_gain_29/
@@ -58,7 +58,8 @@ OUTPUT_CSV = os.path.join(
 
 METHODS = (
     "proposed",
-    "conv",
+    "golay",     # M3.1, Golay + SBSD
+    "conv",      # M3.1 in earlier runs; missing folders are skipped
     "ldpc",
     "3",
 )
@@ -269,7 +270,7 @@ def parse_audio_id(
     Expected names:
 
     received_audio_0_proposed.wav
-    received_audio_0_conv.wav
+    received_audio_0_golay.wav
     received_audio_0_ldpc.wav
     received_audio_0_3.wav
     """
