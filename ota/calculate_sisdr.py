@@ -27,18 +27,16 @@ ORIGINAL_DIR = os.path.join(
 
 # Received/reconstructed audio:
 #
-# received_audio_superpacket_soft_gain/
-# ├── audio_gain_27/
+# received_audio_superpacket_soft/
+# ├── audio_gain_2/
 # │   ├── proposed/
-# │   ├── golay/      (conv/ in runs before Golay + SBSD)
+# │   ├── golay/
 # │   ├── ldpc/
 # │   └── 3/
-# ├── audio_gain_29/
-# ├── audio_gain_31/
-# ├── audio_gain_33/
-# ├── audio_gain_35/
-# ├── audio_gain_37/
-# └── audio_gain_39/
+# ├── audio_gain_4/
+# ├── ...
+# ├── audio_gain_14/
+# └── audio_gain_89/
 #
 RECEIVED_ROOT = os.path.join(
     PROJECT_ROOT,
@@ -59,7 +57,6 @@ OUTPUT_CSV = os.path.join(
 METHODS = (
     "proposed",
     "golay",     # M3.1, Golay + SBSD
-    "conv",      # M3.1 in earlier runs; missing folders are skipped
     "ldpc",
     "3",
 )

@@ -1,4 +1,6 @@
+import argparse
 import os
+import re
 import sys
 import glob
 import math
@@ -8,6 +10,25 @@ import time
 import json
 import csv
 import datetime
+
+
+def _threads_from_argv(default=4):
+    """--threads, read before NumPy and PyTorch load: they size their thread
+    pools on import."""
+    for i, a in enumerate(sys.argv):
+        if a == "--threads" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith("--threads="):
+            return a.split("=", 1)[1]
+    return str(default)
+
+
+# TX, RX and GNU Radio share one PC. Without a cap, PyTorch and the BLAS
+# library start one thread per core in each Python process; the processes
+# then starve each other and the flowgraph (slow encodes, USRP overflows "O").
+N_THREADS = _threads_from_argv()
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[_var] = N_THREADS
 
 import numpy as np
 import soundfile as sf
@@ -28,6 +49,37 @@ from encodec.utils import convert_audio
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))        # ota/
 REPO_DIR = os.path.dirname(PROJECT_DIR)
 SIM_DIR = os.path.join(REPO_DIR, "sim")
+
+parser = argparse.ArgumentParser(
+    description="Four-method equal-budget transmitter for a USRP TX-gain sweep. "
+                "Set the TX gain in the GNU Radio flowgraph."
+)
+parser.add_argument(
+    "--audio-dir",
+    default=os.path.join(SIM_DIR, "test_data"),
+    help=(
+        "Folder of speech WAVs, searched recursively. Default: sim/test_data, "
+        "the 100 clips of the simulation, sent in the order original_audio_0, 1, 2, ... "
+        "Any other folder (e.g. datasets/LibriTTS/test-clean) is sent in sorted "
+        "path order. Either way: 8 s <= duration < 15 s, first --num-audio files."
+    ),
+)
+parser.add_argument(
+    "--num-audio",
+    type=int,
+    default=100,
+    help="Number of utterances to send, from the start of the list. Default: 100",
+)
+parser.add_argument(
+    "--threads",
+    type=int,
+    default=int(N_THREADS),
+    help="CPU threads for PyTorch/NumPy in this process. Default: 4",
+)
+args = parser.parse_args()
+if args.num_audio < 1 or args.threads < 1:
+    raise ValueError("--num-audio and --threads must be positive")
+torch.set_num_threads(args.threads)
 
 for name in ("vogeo_tx.py", "vogeo_frame.py", os.path.join("bundle", "manifest.json")):
     if not os.path.isfile(os.path.join(SIM_DIR, name)):
@@ -70,50 +122,26 @@ print(f"TX expected-packet CSV: {TX_MANIFEST}")
 # DATASET
 # ============================================================
 
-def _find_librtts_test_clean():
-    """Locate LibriTTS test-clean under datasets/ at the repository root
-    (or, for older layouts, under ota/datasets/)."""
-    preferred = [
-        os.path.join(base, "datasets", *sub)
-        for base in (REPO_DIR, PROJECT_DIR)
-        for sub in (("LibriTTS", "test-clean"),
-                    ("LibriTTS", "LibriTTS", "test-clean"),
-                    ("test-clean",))
-    ]
+def _clip_order(path):
+    """original_audio_<n>.wav (sim/test_data) in numeric order, so the OTA
+    audio_id equals the simulation's clip number; other files by path."""
+    m = re.fullmatch(r"original_audio_(\d+)\.wav", os.path.basename(path))
+    return (0, int(m.group(1)), path) if m else (1, 0, path)
 
-    def has_wav(path):
-        if not os.path.isdir(path):
-            return False
-        return bool(glob.glob(os.path.join(path, "**", "*.wav"), recursive=True))
 
-    for path in preferred:
-        if has_wav(path):
-            return os.path.abspath(path)
-
-    datasets_root = os.path.join(REPO_DIR, "datasets")
-    for base in (REPO_DIR, PROJECT_DIR):
-        root_dir = os.path.join(base, "datasets")
-        if not os.path.isdir(root_dir):
-            continue
-        for root, dirs, _files in os.walk(root_dir):
-            if os.path.basename(root).lower() == "test-clean" and has_wav(root):
-                return os.path.abspath(root)
-
+DATASET_DIR = os.path.abspath(args.audio_dir)
+if not os.path.isdir(DATASET_DIR):
     raise RuntimeError(
-        "Could not locate LibriTTS test-clean under the project.\n"
-        f"Searched below: {datasets_root}\n"
-        "Expected something like datasets/LibriTTS/test-clean or "
-        "datasets/LibriTTS/LibriTTS/test-clean."
+        f"Audio folder not found: {DATASET_DIR}\n"
+        "The default is sim/test_data; pass another folder with --audio-dir."
     )
-
-
-DATASET_DIR = _find_librtts_test_clean()
 
 all_wav_files = sorted(
     glob.glob(
         os.path.join(DATASET_DIR, "**", "*.wav"),
         recursive=True,
-    )
+    ),
+    key=_clip_order,
 )
 
 if not all_wav_files:
@@ -152,7 +180,7 @@ if not wav_files:
         f"{MAX_AUDIO_DURATION_S:.1f} seconds under {DATASET_DIR}"
     )
 
-NUM_AUDIO = 100
+NUM_AUDIO = args.num_audio
 wav_files = wav_files[:NUM_AUDIO]
 
 print(f"[TX] Dataset             = {DATASET_DIR}")
@@ -287,9 +315,7 @@ PLAIN_PAD_BITS = (
 # The receiver decodes it with softbit source decoding (golay_sbsd.py).
 #
 # 75 frames * 40 bits = 3000 bits. One zero byte is appended so the segment is
-# 376 B, the size of the convolutional segment it replaces: the super-packet
-# stays 1502 B and the GNU Radio flowgraph needs no change. The receiver
-# ignores the 8 fill bits.
+# 376 B, the same size as the LDPC segment. The receiver ignores the 8 fill bits.
 # ============================================================
 
 golay = GolaySBSD()                                 # encoder only; no prior needed
@@ -597,8 +623,7 @@ SUPER_PACKET_BITS = (
 # ============================================================
 
 MAGIC = b"VQ"
-# 6 = Golay + SBSD super-packet with frame-major M2 bits. Type 5 was the
-# earlier convolutional layout; the receiver rejects it.
+# 6 = four-method super-packet (proposed, Golay + SBSD, LDPC, uncoded).
 TYPE_SUPER_SOFT = 6
 
 HEADER_FORMAT = "!2sBIHHH"

@@ -121,7 +121,7 @@ except RuntimeError:
 # ============================================================
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-SOFT_REF_DIR = os.path.join(PROJECT_DIR, "reference_soft")
+SOFT_REF_DIR = os.path.join(PROJECT_DIR, "sim")   # learned TX/RX code and bundle
 
 required_py = (
     "vogeo_tx.py",
@@ -139,11 +139,11 @@ if missing_py:
         + ", ".join(missing_py)
     )
 
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
+if SOFT_REF_DIR not in sys.path:
+    sys.path.insert(0, SOFT_REF_DIR)
 
-from reference_soft.vogeo_tx import VogeoTx
-from reference_soft.vogeo_rx import VogeoRx
+from vogeo_tx import VogeoTx
+from vogeo_rx import VogeoRx
 
 
 def _read_manifest(bundle_dir):
@@ -160,9 +160,7 @@ def _read_manifest(bundle_dir):
 
 def _find_30plus10_soft_bundle():
     preferred_roots = [
-        os.path.join(SOFT_REF_DIR, "bundle_3_4"),
-        os.path.join(SOFT_REF_DIR, "bundle_3_out_4"),
-        os.path.join(SOFT_REF_DIR, "bundle_30_10"),
+        os.path.join(SOFT_REF_DIR, "bundle"),
     ]
 
     candidates = []

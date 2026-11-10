@@ -2,7 +2,7 @@
 
 # Low-Latency Deep-JSCC for Neural Speech Codecs With Over-the-Air Validation
 
-**Code, trained models and measurement data for the paper submitted to IEEE WCNC 2027**
+**Code, trained models and results for the paper submitted to IEEE WCNC 2027**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Paper: under review](https://img.shields.io/badge/IEEE_WCNC_2027-under_review-orange.svg)](#citation)
@@ -41,7 +41,7 @@ The method is evaluated in two ways:
 
 **[Listen to the samples →](https://hisar-research.github.io/usrp-digital-jscc-audio/)**
 
-The demo page plays three LibriTTS utterances received over the air at USRP TX gains of 31, 33 and 35 dB. Each one is decoded with the proposed Deep-JSCC receiver, uncoded EnCodec at 3 kbps, EnCodec + convolutional code, and EnCodec + LDPC, next to the original recording. These samples were recorded before M3.1 changed from the convolutional code to Golay + SBSD.
+The demo page plays three LibriTTS utterances received over the air, next to the original recording. It was recorded with an earlier version of the testbed, in which a convolutional code took the place of Golay + SBSD.
 
 ## Over-the-air testbed
 
@@ -59,6 +59,11 @@ The demo page plays three LibriTTS utterances received over the air at USRP TX g
 
 USRP TX gain is an **experimental setting, not a measured SNR**. OTA results are plotted against TX gain, and simulation results against modelled E<sub>s</sub>/N<sub>0</sub>.
 
+<p align="center">
+  <img src="ota/figures/estoi_vs_tx_gain_95ci_ceiling.png" alt="OTA ESTOI against USRP TX gain from 2 to 14 dB for the four methods, with 95% confidence intervals and the 89 dB ceilings" width="480">
+</p>
+<p align="center"><em>OTA ESTOI against TX gain, 50 utterances per gain. PESQ and SI-SDR are in <a href="ota/figures/">ota/figures/</a>.</em></p>
+
 ## Methods compared
 
 All methods spend the same budget: about 3,000 bits per 1-second chunk (40 bits per EnCodec frame). The simulation and the OTA scripts implement the same four methods.
@@ -72,9 +77,7 @@ All methods spend the same budget: about 3,000 bits per 1-second chunk (40 bits 
 
 The **Simulation** column gives the method IDs used in [`sim/`](sim/README.md). The **OTA** column gives the `method` labels in the measurement CSV files.
 
-> **Earlier OTA data:** the measurements in `ota/measurement_30 oct/`, the audio demo and the block diagram above were made before M3.1 changed. They use a convolutional code as M3.1 (K = 7, (133,171)<sub>8</sub>, punctured to rate 3/4, soft Viterbi), labelled `conv`.
-
-The OTA scripts load the trained model, the learned TX/RX code and the SBSD prior from `sim/`, so both experiments use the same bundle, `sim/bundle/` (`run_id` `fa03d421aa9837a8`). The other bundles in this repository are different model variants and are not interchangeable.
+The OTA scripts load the trained model, the learned TX/RX code and the SBSD prior from `sim/`, so both experiments use the same bundle, `sim/bundle/` (`run_id` `fa03d421aa9837a8`).
 
 ## Repository layout
 
@@ -103,15 +106,8 @@ The OTA scripts load the trained model, the learned TX/RX code and the SBSD prio
 │   ├── bpsk_jscc_RX_iq_capture.grc                GNU Radio flowgraph for both radios
 │   ├── graphs.py                 PESQ / ESTOI / SI-SDR against TX gain
 │   ├── calculate_sisdr.py        SI-SDR from saved audio
-│   ├── measurement_30 oct/       Measured metric tables (M3.1 = convolutional code)
-│   ├── measurement_before_30 oct/  Earlier measurement tables
-│   └── old/                      Archived snapshot of the previous layout
+│   └── figures/                  OTA results: PESQ, ESTOI and SI-SDR against TX gain
 │
-├── reference_soft/               Earlier copy of the learned TX/RX and bundles; ota/ no longer uses it
-│   ├── bundle_3_out_4/           3 layers + 10 parity bits: same weights as sim/bundle/
-│   └── bundle_soft/              2 layers + 20 parity bits: a different variant
-│
-├── deepJSCC_voice_hard_1_2/      Earlier hard-decision model, kept for reference
 ├── benchmark_processing_latency.py  Processing-latency benchmark (earlier 3-method comparison)
 ├── benchmark_tx_stage_latency.py    TX-stage latency benchmark
 ├── latency_*.csv, tx_stage_latency_*.csv  Benchmark outputs
@@ -207,18 +203,9 @@ For the full sweep behind the paper's simulation results, the options and the ou
 
 ### B. Run an OTA measurement
 
-You need two USRP B210s, GNU Radio and UHD (step 4 above), and the LibriTTS `test-clean` set. **[`ota/README.md`](ota/README.md) is the full guide**; this is the outline.
+You need two USRP B210s, GNU Radio and UHD (step 4 above). **[`ota/README.md`](ota/README.md) is the full guide**; this is the outline.
 
-1. **Get the speech data.** Download LibriTTS `test-clean` (1.2 GB) from [OpenSLR 60](https://www.openslr.org/60/) into `datasets/`, which Git ignores:
-
-   ```bash
-   mkdir -p datasets && cd datasets
-   wget https://www.openslr.org/resources/60/test-clean.tar.gz
-   tar -xzf test-clean.tar.gz        # creates LibriTTS/test-clean/
-   cd ..
-   ```
-
-   The OTA scripts find `datasets/` at the repository root, and load the model, the learned TX/RX code and the SBSD prior from `sim/`, so no links or path edits are needed.
+1. **Speech data: nothing to download.** The transmitter sends the 100 clips in `sim/test_data/`, the same clips as the simulation, in the order `original_audio_0`, `1`, `2`, … so OTA utterance *n* is simulation clip *n*. To send other speech, pass a folder with `--audio-dir`. The OTA scripts also load the model, the learned TX/RX code and the SBSD prior from `sim/`, so no links or path edits are needed.
 
 2. **Optional: check M3.1.** This compares the OTA Golay + SBSD code with the simulation's and should end with `Golay + SBSD matches the simulation`:
 
@@ -226,23 +213,23 @@ You need two USRP B210s, GNU Radio and UHD (step 4 above), and the LibriTTS `tes
    python ota/golay_sbsd.py
    ```
 
-3. **Point the flowgraph at your radios.** In `ota/bpsk_jscc_RX_iq_capture.grc`, the USRP sink (TX) and source (RX) select their B210s by serial number. Replace `serial=33559EA` and `serial=3367F2F` with the serials that `uhd_find_devices` reports. Also check the 868 MHz carrier against your local regulations.
+3. **Point the flowgraph at your radios.** In `ota/bpsk_jscc_RX_iq_capture.grc`, the USRP sink (TX) and source (RX) select their B210s by serial number. Replace `serial=33A6D84` (TX) and `serial=327AB4A` (RX) with the serials that `uhd_find_devices` reports. Also check the 868 MHz carrier against your local regulations.
 
-4. **Start the three parts in this order**, each in its own terminal, from `ota/`. The transmitter and receiver must both be the current versions: the receiver rejects packets from the earlier convolutional-code transmitter.
+4. **Start the three parts in this order**, each in its own terminal, from `ota/`:
 
    ```bash
    # Terminal 1: receiver. --tx-gain only labels the output files
-   python rx_four_methods_soft_ldpc_iq_llr_capture.py --tx-gain 31
+   python rx_four_methods_soft_ldpc_iq_llr_capture.py --tx-gain 8
    ```
 
    - **Terminal 2:** open `bpsk_jscc_RX_iq_capture.grc` in GNU Radio Companion, set the TX gain to match the label, and start the flowgraph.
    - **Terminal 3:**
 
      ```bash
-     python tx_four_methods_with_ldpc_iq_capture.py
+     python tx_four_methods_with_ldpc_iq_capture.py --num-audio 50
      ```
 
-The receiver writes decoded audio, PESQ/ESTOI tables and IQ/LLR captures under `ota/`. Repeat for each TX gain: a sweep is 7 gains plus one reference run at 89 dB. The full procedure, the ports, packet format and capture file formats are in [`ota/README.md`](ota/README.md#5-running-an-ota-measurement).
+The receiver writes decoded audio, PESQ/ESTOI tables and IQ/LLR captures under `ota/`. Repeat for each TX gain. The final measurements used TX gains of 2, 4, 6, 8, 10, 12 and 14 dB, plus a reference run at 89 dB, with 50 utterances each. The full procedure, the ports, packet format and capture file formats are in [`ota/README.md`](ota/README.md#5-running-an-ota-measurement).
 
 ### C. Plot the OTA results
 
@@ -253,7 +240,7 @@ python calculate_sisdr.py     # SI-SDR table from the saved WAVs
 python graphs.py              # PESQ, ESTOI and SI-SDR against TX gain, in ota/figures/
 ```
 
-`graphs.py` reads only the tables of the new sweep in `ota/`, not the archived ones in `ota/measurement_30 oct/`. The 89 dB run is drawn as horizontal ceiling lines, not as a sweep point.
+The 89 dB run is drawn as horizontal ceiling lines, not as a sweep point.
 
 ## Reproducibility notes
 

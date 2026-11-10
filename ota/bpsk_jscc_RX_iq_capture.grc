@@ -99,7 +99,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [752, 216.0]
+    coordinate: [632, 312.0]
     rotation: 0
     state: enabled
 - name: rx_gain
@@ -1201,7 +1201,7 @@ blocks:
     clock_source6: ''
     clock_source7: ''
     comment: ''
-    dev_addr: '"serial=33559EA,send_frame_size=4096,num_send_frames=64"'
+    dev_addr: '"serial=33A6D84,send_frame_size=4096,num_send_frames=64"'
     dev_args: ''
     gain0: gain
     gain1: '0'
@@ -1543,7 +1543,7 @@ blocks:
     dc_offs_enb7: default
     dc_offs_enb8: default
     dc_offs_enb9: default
-    dev_addr: '"serial=3367F2F,recv_frame_size=4096,num_recv_frames=64"'
+    dev_addr: '"serial=327AB4A,recv_frame_size=4096,num_recv_frames=64"'
     dev_args: ''
     gain0: rx_gain
     gain1: '0'

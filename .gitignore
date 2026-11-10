@@ -67,6 +67,16 @@ data/downloads/
 gr-gsm/
 gnuradio-cache/
 
+# OTA run outputs (only the PNG figures are kept)
+ota/original_audio/
+ota/received_audio_superpacket_soft/
+ota/ota_captures/
+ota/*_results_superpacket_soft_txgain.csv
+ota/figures/*.eps
+ota/figures/*.pdf
+# Script GNU Radio Companion generates from the flowgraph
+ota/untitled*.py
+
 # Large archives
 *.zip
 *.tar

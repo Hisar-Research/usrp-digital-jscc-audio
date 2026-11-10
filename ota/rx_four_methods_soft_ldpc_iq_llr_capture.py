@@ -10,6 +10,25 @@ import time
 import select
 from pathlib import Path
 
+
+def _threads_from_argv(default=4):
+    """--threads, read before NumPy and PyTorch load: they size their thread
+    pools on import."""
+    for i, a in enumerate(sys.argv):
+        if a == "--threads" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith("--threads="):
+            return a.split("=", 1)[1]
+    return str(default)
+
+
+# TX, RX and GNU Radio share one PC. Without a cap, PyTorch and the BLAS
+# library start one thread per core in each Python process; the processes
+# then starve each other and the flowgraph (late packets, USRP overflows "O").
+N_THREADS = _threads_from_argv()
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[_var] = N_THREADS
+
 import numpy as np
 import soundfile as sf
 import torch
@@ -108,7 +127,16 @@ parser.add_argument(
         "the VOGEO and Golay + SBSD decoders. Default: 50"
     ),
 )
+parser.add_argument(
+    "--threads",
+    type=int,
+    default=int(N_THREADS),
+    help="CPU threads for PyTorch/NumPy in this process. Default: 4",
+)
 args = parser.parse_args()
+if args.threads < 1:
+    raise ValueError("--threads must be positive")
+torch.set_num_threads(args.threads)
 TX_GAIN_DB = float(args.tx_gain)
 VOGEO_LLR_CLIP = float(args.vogeo_llr_clip)
 if VOGEO_LLR_CLIP <= 0.0:
@@ -609,8 +637,7 @@ IQ_SAMPLE_BYTES = RECORDING_SAMPLES * np.dtype("<c8").itemsize
 # ============================================================
 
 MAGIC = b"VQ"
-# 6 = Golay + SBSD super-packet with frame-major M2 bits. Type 5 was the
-# earlier convolutional layout and is rejected.
+# 6 = four-method super-packet (proposed, Golay + SBSD, LDPC, uncoded).
 TYPE_SUPER_SOFT = 6
 
 HEADER_FORMAT = "!2sBIHHH"

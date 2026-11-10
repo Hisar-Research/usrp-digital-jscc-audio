@@ -7,9 +7,6 @@ Reads the CSVs that the current scripts write into the results directory
     estoi_results_superpacket_soft_txgain.csv   written by the RX script
     sisdr_results_superpacket_soft_txgain.csv   written by calculate_sisdr.py (optional)
 
-The archived measurements in measurement_30 oct/ and measurement_before_30 oct/
-are not read.
-
 Rows with tx_gain_db == 89 are the reference run at maximum TX gain. They are
 not plotted as a point on the gain axis; their mean gives the horizontal
 ceiling lines (coded methods: proposed; uncoded: 3).
