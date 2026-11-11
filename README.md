@@ -18,6 +18,10 @@
 
 </div>
 
+> [!NOTE]
+> **The OTA measurements are being repeated with more samples to produce smoother plots.**
+> The updated figures will be added to [`ota/`](ota/README.md) when they are ready.
+
 ---
 
 Neural speech codecs such as [EnCodec](https://github.com/facebookresearch/encodec) compress speech to a few kilobits per second, but a single bit error in a codebook index can corrupt the decoded audio. Classical channel codes fix this only by waiting for long blocks, which adds latency.
